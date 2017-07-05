@@ -18,6 +18,10 @@ CREATE TABLE channels(
   token_address BYTEA,
   deposit INTEGER,
   balance INTEGER,
-  lastUpdate INTEGER REFERENCES channel_updates (id)
+  created_block INTEGER,
+  settlement_period INTEGER,
+  settlement_expiration INTEGER,
+  state INTEGER, /* enum ChannelState { Open, Settling, Settled } */
+  last_update INTEGER REFERENCES channel_updates (id)
   PRIMARY KEY (chain_id, contract_id, channel_id)
 );
