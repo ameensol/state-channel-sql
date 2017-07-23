@@ -1,4 +1,4 @@
-CREATE TABLE channel_updates(
+CREATE TABLE channel_updates (
   id INTEGER PRIMARY KEY,
   chain_id INTEGER,
   contract_id BYTEA,
@@ -9,7 +9,7 @@ CREATE TABLE channel_updates(
   time TIMESTAMPTZ
 );
 
-CREATE TABLE channels(
+CREATE TABLE channels (
   chain_id INTEGER,
   contract_id BYTEA,
   channel_id BYTEA,

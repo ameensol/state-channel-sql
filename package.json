@@ -1,0 +1,14 @@
+{
+  "devDependencies": {
+    "chai": "^4.1.0",
+    "chai-subset": "^1.5.0",
+    "mocha": "^3.4.2",
+    "pgtools": "^0.2.3"
+  },
+  "scripts": {
+    "test": "mocha -w --inspect"
+  },
+  "dependencies": {
+    "pg-async": "^2.4.3"
+  }
+}
