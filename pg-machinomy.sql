@@ -47,39 +47,6 @@ create table invalid_state_updates (
 
 
 --
--- Channels
---
-
-create type mcy_channel_status as enum (
-    'CS_PENDING',  -- Pending blockchain confirmation
-    'CS_OPEN',     -- Open for business
-    'CS_SETTLING', -- Sender has requested settlement
-    'CS_SETTLED'   -- Channel has been settled
-);
-
-create table channels (
-    id bigserial primary key,
-    chain_id int not null,
-    contract_id mcy_eth_address not null,
-    channel_id mcy_sha3_hash not null,
-
-    sender mcy_eth_address not null,
-    receiver mcy_eth_address not null,
-    value mcy_eth,
-    settlement_period integer,
-    payment mcy_eth,
-
-    status mcy_channel_status not null,
-    opened_on timestamp null,
-    settlement_started_on timestamp null,
-    settlement_finalized_on timestamp null
-);
-
-create unique index channels_chain_contract_channel_unique_idx
-on channels (chain_id, contract_id, channel_id);
-
-
---
 -- Events
 --
 
@@ -97,290 +64,471 @@ create table channel_events (
     chain_id int not null,
     contract_id mcy_eth_address not null,
     channel_id mcy_sha3_hash not null,
+
+    -- For blockchain events, the "ts" will be the block's timestamp. For
+    -- "intent" events, the "ts" will be the server timestamp at the time the
+    -- event was received.
     ts timestamp not null,
 
-    block_number bigint not null,
+    -- For "intent" events the block_number is the latest known block number at
+    -- the time the intent was issued. This is used to enforce serialization
+    -- between "intent" events and block-based events.
+    block_number int not null,
+
+    -- For "intent" events, the block hash will be null until it has been
+    -- correlated with a blockchain event, at which point it will be set to the
+    -- block's hash.
     block_hash mcy_sha3_hash not null,
+
+    -- Will always be true for intent events.
+    block_is_valid boolean not null,
+
+    -- For "intent" events, the "sender" is the address we expect the
+    -- transaction to be sent from.
     sender mcy_eth_address not null,
+
     event_type mcy_channel_event_type not null,
 
     fields jsonb not null
 );
 
-create table invalid_channel_events (
+
+create index channel_events_ordering_idx
+on channel_events (chain_id, contract_id, channel_id, block_number, block_hash, ts);
+
+
+create table channel_intents (
     id bigserial primary key,
-    inserted_on timestamp not null,
-    type text not null,
-    reason text not null,
-    blob jsonb not null
+    chain_id int not null,
+    contract_id mcy_eth_address not null,
+    channel_id mcy_sha3_hash not null,
+
+    -- For blockchain events, the "ts" will be the block's timestamp. For
+    -- "intent" events, the "ts" will be the server timestamp at the time the
+    -- event was received.
+    ts timestamp not null,
+
+    -- For "intent" events the block_number is the latest known block number at
+    -- the time the intent was issued. This is used to enforce serialization
+    -- between "intent" events and block-based events.
+    block_number int not null,
+
+    -- For "intent" events, the block hash will be null until it has been
+    -- correlated with a blockchain event, at which point it will be set to the
+    -- block's hash.
+    block_hash mcy_sha3_hash,
+
+    -- Will always be true for intent events.
+    block_is_valid boolean null,
+
+    -- For "intent" events, the "sender" is the address we expect the
+    -- transaction to be sent from.
+    sender mcy_eth_address not null,
+
+    event_type mcy_channel_event_type not null,
+
+    fields jsonb not null
 );
+
+
+create index channel_intents_ordering_idx
+on channel_events (chain_id, contract_id, channel_id, block_number, block_hash, ts);
+
+create function mcy_get_intent_block_hash(intent channel_intents)
+returns mcy_sha3_hash
+language sql as $$
+    select block_hash
+    from channel_events as ce
+    where
+        ce.chain_id = intent.chain_id and
+        ce.contract_id = intent.contract_id and
+        ce.channel_id = intent.channel_id and
+        ce.block_number >= intent.block_number and
+        ce.sender = intent.sender and
+        ce.event_type = intent.event_type and
+        ce.fields = intent.fields and
+        ce.block_is_valid
+    order by id desc limit 1;
+$$;
+
+create function mcy_update_channel_intents_trigger()
+returns trigger
+language plpgsql as $pgsql$
+declare
+    dummy boolean;
+begin
+    if TG_OP = 'INSERT' then
+        update channel_intents as ci
+        set block_hash = NEW.block_hash
+        where
+            ci.chain_id = NEW.chain_id and
+            ci.contract_id = NEW.contract_id and
+            ci.channel_id = NEW.channel_id and
+            ci.block_number <= NEW.block_number and
+            ci.sender = NEW.sender and
+            ci.event_type = NEW.event_type and
+            ci.fields = NEW.fields;
+    else
+        update channel_intents as ci
+        set block_hash = mcy_get_intent_block_hash(ci)
+        where
+            ci.chain_id = OLD.chain_id and
+            ci.contract_id = OLD.contract_id and
+            ci.channel_id = OLD.channel_id and
+            ci.block_number <= OLD.block_number and
+            ci.sender = OLD.sender and
+            ci.event_type = OLD.event_type and
+            ci.fields = OLD.fields;
+    end if;
+
+    return null;
+end
+$pgsql$;
+
+create trigger mcy_update_channel_intents_trigger
+after insert or update or delete
+on channel_events
+for each row execute procedure mcy_update_channel_intents_trigger();
+
 
 create function mcy_insert_channel_event(event jsonb)
 returns jsonb
 language plpgsql as $pgsql$
 declare
-    channel channels;
-    event_type text := (event->>'type');
+    event_type text := (event->>'event_type');
     fields jsonb := (event->'fields');
     error jsonb;
 begin
-    select *
-    from channels
-    where
-        chain_id = (event->>'chain_id')::int and
-        contract_id = (event->>'contract_id')::mcy_eth_address and
-        channel_id = (event->>'channel_id')::mcy_sha3_hash
-    into channel
-    for no key update;
-
-    -- DidCreateChannel (when a channel does not exist)
-    if channel.id is null then
-        error := mcy_assert_channel_event(event, 'DidCreateChannel');
-        if error is not null then
-            return error;
-        end if;
-
-        begin
-            insert into channels (
-                chain_id, contract_id, channel_id,
-                sender, receiver, status, opened_on
-            )
-            values (
-                (event->>'chain_id')::int,
-                (event->>'contract_id')::mcy_eth_address,
-                (event->>'channel_id')::mcy_sha3_hash,
-                (fields->>'sender')::mcy_eth_address,
-                (fields->>'receiver')::mcy_eth_address,
-                'CS_OPEN',
-                to_timestamp((event->>'ts')::int)
-            )
-            returning * into channel;
-        exception when unique_violation then
-            return mcy_insert_channel_event(event);
-        end;
-
-    -- DidCreateChannel (when a channel already exists)
-    elsif channel.status = 'CS_PENDING' then
-        error := mcy_assert_channel_event(event, 'DidCreateChannel');
-        if error is not null then
-            return error;
-        end if;
-
-        update channels
-        set
-            sender = (fields->>'sender')::mcy_eth_address,
-            receiver = (fields->>'receiver')::mcy_eth_address,
-            status = 'CS_OPEN',
-            opened_on = to_timestamp((event->>'ts')::int)
-        where id = channel.id
-        returning * into channel;
-
-    -- DidDeposit
-    elsif event_type = 'DidDeposit' then
-        error := mcy_assert_channel_status(channel, event, 'CS_OPEN');
-        if error is not null then
-            return error;
-        end if;
-
-        update channels
-        set
-            value = (fields->>'value')::mcy_eth
-        where id = channel.id
-        returning * into channel;
-
-    -- DidStartSettle
-    elsif event_type = 'DidStartSettle' then
-        error := mcy_assert_channel_status(channel, event, 'CS_OPEN');
-        if error is not null then
-            return error;
-        end if;
-
-        update channels
-        set
-            settlement_started_on = to_timestamp((event->>'ts')::int),
-            payment = (fields->>'payment')::mcy_eth,
-            status = 'CS_SETTLING'
-        where id = channel.id
-        returning * into channel;
-
-    -- DidSettle
-    elsif event_type = 'DidSettle' then
-        error := mcy_assert_channel_status(channel, event, 'CS_OPEN', 'CS_SETTLING');
-        if error is not null then
-            return error;
-        end if;
-
-        update channels
-        set
-            settlement_finalized_on = to_timestamp((event->>'ts')::int),
-            payment = (fields->>'payment')::mcy_eth,
-            status = 'CS_SETTLED'
-        where id = channel.id
-        returning * into channel;
-
-    else
-        error := mcy_assert_channel_event(event, 'SOME_VALID_TYPE');
-        return error;
-    end if;
-
     insert into channel_events (
         chain_id, contract_id, channel_id,
-        ts, block, sender, event_type, fields
+        ts,
+        block_hash, block_number, block_is_valid,
+        sender, event_type, fields
     )
     values (
         (event->>'chain_id')::int,
         (event->>'contract_id')::mcy_eth_address,
         (event->>'channel_id')::mcy_sha3_hash,
+
         to_timestamp((event->>'ts')::int),
-        (event->>'block')::mcy_sha3_hash,
+
+        (event->>'block_hash')::mcy_sha3_hash,
+        (event->>'block_number')::int,
+        true,
+
         (event->>'sender')::mcy_eth_address,
-        (event->>'type')::mcy_channel_event_type,
+        (event->>'event_type')::mcy_channel_event_type,
         fields
     );
 
-    return row_to_json(channel);
+    return mcy_get_channel(event, true);
 end
 $pgsql$;
 
 
--- Asserts that `event`'s type is `expected_type`. If it isn't, `event` is
--- inserted into `invalid_channel_events` and an error is returned.
-create function mcy_assert_channel_event(event jsonb, expected_type mcy_channel_event_type)
+create function mcy_insert_channel_intent(intent jsonb)
 returns jsonb
 language plpgsql as $pgsql$
 declare
-    event_actual_type mcy_channel_event_type := (event->>'type');
-    err_msg text;
+    event_type text := (intent->>'event_type');
+    fields jsonb := (intent->'fields');
+    new_intent channel_intents;
 begin
-    if event_actual_type = expected_type then
-        return null;
-    end if;
-    err_msg := (
-        'Invalid event for channel state: ' || event_actual_type ||
-        ' (expected: ' || expected_type || ')'
-    );
-
-    insert into invalid_channel_events (inserted_on, type, reason, blob)
-    values (now(), 'invalid_event_type', err_msg, event);
-
-    return json_build_object(
-        'error', true,
-        'reason', err_msg,
-        'type', 'invalid_event_type',
-        'expected_types', array[expected_type],
-        'actual_type', event_actual_type
-    );
-end
-$pgsql$;
-
-
--- Asserts that `channel`'s status is `expected_a` or `expected_b`. If it
--- isn't, `event` is inserted into `invalid_channel_events` and an error is
--- returned.
-create function mcy_assert_channel_status(
-    channel channels, event jsonb,
-    expected_a mcy_channel_status, expected_b mcy_channel_status default null
-)
-returns jsonb
-language plpgsql as $pgsql$
-declare
-    err_msg text;
-    b_msg text;
-begin
-    if (channel.status = expected_a or channel.status = expected_b) then
-        return null;
-    end if;
-    b_msg := (
-        case when expected_b is null
-        then ''
-        else (' or ' || expected_b)
-        end
-    );
-    err_msg := (
-        'Invalid status for channel: ' || channel.status ||
-        ' (expected: ' || expected_a || b_msg || ')'
-    );
-
-    insert into invalid_channel_events (inserted_on, type, reason, blob)
-    values (now(), 'invalid_channel_status', err_msg, event);
-
-    return json_build_object(
-        'error', true,
-        'reason', err_msg,
-        'type', 'invalid_channel_status',
-        'expected_statuses', (
-            case when expected_b is null
-            then array[expected_a]
-            else array[expected_a, expected_b]
-            end
-        ),
-        'actual_status', channel.status
-    );
-end
-$pgsql$;
-
-
-create function mcy_insert_channel(chan jsonb)
-returns jsonb
-language plpgsql as $pgsql$
-declare
-    channel channels;
-begin
-    insert into channels (
+    insert into channel_intents (
         chain_id, contract_id, channel_id,
-        sender, receiver, status
+        ts,
+        block_hash, block_number,
+        sender, event_type, fields
     )
     values (
-        (chan->>'chain_id')::int,
-        (chan->>'contract_id')::mcy_eth_address,
-        (chan->>'channel_id')::mcy_sha3_hash,
-        (chan->>'sender')::mcy_eth_address,
-        (chan->>'receiver')::mcy_eth_address,
-        'CS_PENDING'
+        (intent->>'chain_id')::int,
+        (intent->>'contract_id')::mcy_eth_address,
+        (intent->>'channel_id')::mcy_sha3_hash,
+
+        now(),
+
+        null,
+        (intent->>'block_number')::int,
+
+        (intent->>'sender')::mcy_eth_address,
+        (intent->>'event_type')::mcy_channel_event_type,
+        fields
     )
-    returning * into channel;
+    returning * into new_intent;
+
+    update channel_intents
+    set block_hash = mcy_get_intent_block_hash(new_intent)
+    where id = new_intent.id;
+
+    return mcy_get_channel(intent, true);
+end
+$pgsql$;
+
+
+
+-- Updates the database so that it's in sync with the current blockchain state.
+-- ``chain_id`` is the block chain being updated, ``first_block_num`` is the
+-- block number of the first block in ``block_hashes``, which is a list of
+-- block hashes.
+create function mcy_set_recent_blocks(chain_id_ int, first_block_num int, block_hashes text[])
+returns jsonb
+language plpgsql as $pgsql$
+declare
+    ue record;
+    updated_event_count int := 0;
+    contract_key text;
+    updated_contracts_hstore hstore := ''::hstore;
+    updated_contracts_list jsonb[];
+begin
+    for ue in
+        with events_with_is_valid as (
+            select
+                events.id,
+                events.block_hash = coalesce(
+                    block_hashes[block_number - first_block_num + 1],
+                    '<invalid>'
+                ) as new_is_valid
+            from channel_events as events
+            where
+                chain_id = chain_id_ and
+                block_hash is not null and
+                block_number >= first_block_num
+        )
+        update channel_events as e
+        set block_is_valid = new_is_valid
+        from events_with_is_valid as u
+        where
+            e.id = u.id and
+            e.block_is_valid <> u.new_is_valid
+        returning e.*, u.new_is_valid
+    loop
+        updated_event_count := updated_event_count + 1;
+        contract_key := ue.chain_id || ' ' || ue.contract_id || ' ' || ue.channel_id;
+        if (updated_contracts_hstore->contract_key) is not null then
+            continue;
+        end if;
+        updated_contracts_hstore := updated_contracts_hstore || hstore(contract_key, 'true');
+        updated_contracts_list := array_append(updated_contracts_list, json_build_object(
+            'chain_id', ue.chain_id,
+            'contract_id', ue.contract_id,
+            'channel_id', ue.channel_id
+        )::jsonb);
+    end loop;
+
     return json_build_object(
-        'created', true,
-        'channel', row_to_json(channel)
-    );
-exception when unique_violation then
-    select *
-    from channels
-    where
-        chain_id = (chan->>'chain_id')::int and
-        contract_id = (chan->>'contract_id')::mcy_eth_address and
-        channel_id = (chan->>'channel_id')::mcy_sha3_hash
-    into channel;
-    return json_build_object(
-        'created', false,
-        'channel', row_to_json(channel)
+        'updated_event_count', updated_event_count,
+        'updated_channels', array((
+            select mcy_get_channel(chan, false)
+            from unnest(updated_contracts_list) as x(chan)
+        ))
     );
 end
 $pgsql$;
 
 
-create function mcy_get_channel_state(chan jsonb)
+--
+-- Channels
+--
+
+create type mcy_channel_state as enum (
+    'CS_OPEN',     -- Open for business
+    'CS_SETTLING', -- Sender has requested settlement
+    'CS_SETTLED'   -- Channel has been settled
+);
+
+-- The 'channels' table is purely aggregate and should not be written to
+-- directly. It will be updated by `mcy_refresh_channel(chan)`
+
+create table channels_cache (
+    id bigserial primary key,
+
+    chain_id int not null,
+    contract_id mcy_eth_address not null,
+    channel_id mcy_sha3_hash not null,
+
+    last_state_id bigint references state_updates(id),
+    last_event_id bigint references channel_events(id),
+
+    sender mcy_eth_address,
+    receiver mcy_eth_address,
+    value mcy_eth,
+    settlement_period int,
+    until timestamp,
+
+    payment mcy_eth,
+    odd_value mcy_eth,
+
+    state mcy_channel_state,
+    state_is_intent boolean,
+
+    opened_on timestamp,
+    settlement_started_on timestamp,
+    settlement_finalized_on timestamp
+);
+
+-- Returns all of the events that pertain to a channel in their canonical order
+-- (ie, oldest first), excluding events from blocks known to be orphaned. If
+-- ``include_intent`` is set, "intent" invents will be included (not just
+-- events from the block chain).
+create function mcy_get_channel_events(chan jsonb, include_intent boolean)
+returns setof channel_events
+language sql as $$
+    (
+        select *
+        from channel_events
+        where
+            chain_id = (chan->>'chain_id')::int and
+            contract_id = (chan->>'contract_id')::mcy_eth_address and
+            channel_id = (chan->>'channel_id')::mcy_sha3_hash and
+            block_is_valid
+    )
+    union all
+    (
+        select *
+        from channel_intents
+        where
+            include_intent and
+            chain_id = (chan->>'chain_id')::int and
+            contract_id = (chan->>'contract_id')::mcy_eth_address and
+            channel_id = (chan->>'channel_id')::mcy_sha3_hash and
+            block_hash is null
+    )
+    order by block_number, block_hash, ts
+$$;
+
+
+create function mcy_get_channel(chan jsonb, include_intent boolean)
 returns jsonb
 language plpgsql as $pgsql$
 declare
-    channel channels;
+    channel channels_cache;
+
+    apply_res record;
+    event channel_events;
+    latest_intent_event channel_events;
+    latest_chain_event channel_events;
+
+    is_invalid boolean := null;
+    is_invalid_reason text := null;
+
     latest_state state_updates;
 begin
+    channel := null;
+    event := null;
+    latest_intent_event := null;
+    latest_chain_event := null;
+
+    for event in (select * from mcy_get_channel_events(chan, include_intent)) loop
+        if event.block_hash is null then
+            latest_intent_event := event;
+        else
+            latest_chain_event := event;
+        end if;
+
+        apply_res := mcy_channel_apply_event(channel, event);
+
+        is_invalid := apply_res.is_invalid;
+        is_invalid_reason := apply_res.is_invalid_reason;
+
+        if is_invalid then
+            exit;
+        else
+            channel = apply_res.new_channel;
+        end if;
+
+    end loop;
+
     latest_state := mcy_get_latest_state_update(chan);
 
-    select *
-    from channels
-    where
-        chain_id = (chan->>'chain_id')::int and
-        contract_id = (chan->>'contract_id')::mcy_eth_address and
-        channel_id = (chan->>'channel_id')::mcy_sha3_hash
-    into channel;
-
     return json_build_object(
-        'channel', row_to_json(channel),
-        'latest_state', latest_state,
+        'channel', mcy_null_row_to_json(channel),
+        'latest_state', mcy_state_update_row_to_json(latest_state),
+
         'current_payment', latest_state.amount,
-        'current_remaining_balance', channel.value - latest_state.amount
+        'current_remaining_balance', channel.value - latest_state.amount,
+
+        'latest_event', mcy_null_row_to_json(event),
+        'latest_intent_event', mcy_null_row_to_json(latest_intent_event),
+        'latest_chain_event', mcy_null_row_to_json(latest_chain_event),
+
+        'is_invalid', is_invalid,
+        'is_invalid_reason', is_invalid_reason
+    );
+
+end
+$pgsql$;
+
+
+create function mcy_channel_apply_event(
+    in channel channels_cache, in event channel_events,
+    out new_channel channels_cache, out is_invalid boolean, out is_invalid_reason text
+)
+returns record
+language plpgsql as $pgsql$
+declare
+    event_type text := event.event_type;
+    fields jsonb := event.fields;
+begin
+    if channel is null then
+        channel.chain_id = event.chain_id;
+        channel.contract_id = event.contract_id;
+        channel.channel_id = event.channel_id;
+        channel.last_event_id = event.id;
+    end if;
+
+    -- TODO: check for invalid updates
+
+    if event_type = 'DidCreateChannel' then
+        is_invalid_reason := mcy_assert_channel_state(event_type, channel, NULL);
+        channel.state = 'CS_OPEN';
+        channel.opened_on = event.ts;
+        channel.sender = (fields->>'sender')::mcy_eth_address;
+        channel.receiver = (fields->>'receiver')::mcy_eth_address;
+        channel.settlement_period = (fields->>'settlement_period')::int;
+        channel.until = to_timestamp((fields->>'until')::int);
+        channel.value = 0;
+    elsif event_type = 'DidDeposit' then
+        is_invalid_reason := mcy_assert_channel_state(event_type, channel, 'CS_OPEN');
+        channel.value = coalesce(channel.value, 0) + (fields->>'value')::mcy_eth;
+    elsif event_type = 'DidStartSettle' then
+        is_invalid_reason := mcy_assert_channel_state(event_type, channel, 'CS_OPEN');
+        channel.state = 'CS_SETTLING';
+        channel.settlement_started_on = event.ts;
+        channel.until = event.ts + (channel.settlement_period * (interval '1 second'));
+        channel.payment = (fields->>'payment')::mcy_eth;
+    elsif event_type = 'DidSettle' then
+        is_invalid_reason := mcy_assert_channel_state(event_type, channel, 'CS_OPEN', 'CS_SETTLING');
+        channel.state = 'CS_SETTLED';
+        channel.settlement_finalized_on = event.ts;
+        channel.payment = (fields->>'payment')::mcy_eth;
+        channel.odd_value = (fields->>'odd_value')::mcy_eth;
+    else
+        is_invalid_reason := 'invalid event type: ' || event_type;
+    end if;
+
+    channel.state_is_intent := coalesce(channel.state_is_intent, false) or (event.block_hash is null);
+    new_channel = channel;
+    is_invalid := is_invalid_reason is not null;
+end
+$pgsql$;
+
+
+create function mcy_assert_channel_state(event_type text, channel channels_cache, a text, b text default null)
+returns text
+language plpgsql as $pgsql$
+declare
+    chan_state text := coalesce(channel.state::text, 'NULL');
+begin
+    a = coalesce(a, 'NULL');
+    if chan_state = a or chan_state = b then
+        return null;
+    end if;
+
+    return format(
+        'invalid channel state for event %s: got %s but should be %s',
+        event_type,
+        chan_state,
+        case when b is null then a else a || ' or ' || b end
     );
 end
 $pgsql$;
@@ -478,15 +626,6 @@ begin
         end
     );
 
-    remaining_balance := (
-        select channel.value - latest_state.amount
-        from channels as channel
-        where
-            chain_id = (state_update->>'chain_id')::int and
-            contract_id = (state_update->>'contract_id')::mcy_eth_address and
-            channel_id = (state_update->>'channel_id')::mcy_sha3_hash
-    );
-
     return json_build_object(
         'id', new_row.id,
         'created', (new_row.id is not null),
@@ -549,5 +688,16 @@ begin
     into latest_state;
 
     return latest_state;
+end
+$pgsql$;
+
+create function mcy_null_row_to_json(r anyelement)
+returns jsonb
+language plpgsql as $pgsql$
+begin
+    if r is null then
+        return 'null'::jsonb;
+    end if;
+    return row_to_json(r);
 end
 $pgsql$;

@@ -12,13 +12,15 @@
         channel_hash mcy_sha3_hash
     )
 
+  - After a bunch of experimentation, it seems like no: that wouldn't make
+    things much better, and leads to more confusing code and translation
+    between SQL <-> JS.
+
 - Somehow translate between the values coming from Web3 with the values we're
   expecting.
     - Will values be in wei or eth? (I think wei, but need to be sure)
     - Convert Web3 events into ChannelEvent (esp getting the block hash,
       timestamp, etc)
-
-- TODO: include the channel's remaining value in the `latest_state` message.
 
 - Make sure that `mcy_insert_state_update` has locking or whatever to
   enforce serialization
@@ -27,8 +29,24 @@
 
 - Ongoing maintanence and update workflow
 
+- mark public vs private functions in the SQL interface
 
-Changes as of Jul 28 conversation:
-- Make channels purely aggregate
-- Add the "set blockchain state" function
-- Introduce the the notion of "pending" events
+- benchmark performance of mcy_get_channel, figure out how much caching we
+  need.
+
+Questions:
+
+- Is it possible to uniquely identify events so we can make sure they aren't
+  duplicated?
+  - Would this be `logIndex`?
+
+- The only way a channel can be put into an invalid state is getting events
+  out of the expected order. These checks should be expanded to include, ex,
+  the senders + receivers.
+
+- Create trigger to make sure that events can't be updated after they've
+  been inserted.
+
+- Is it possible for a reorg to make the chain shorter (ie, is the assumption
+  that the intent event's block_number will always be <= the event which
+  contains the actual event valid?)

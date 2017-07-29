@@ -80,7 +80,7 @@ class PGMachinomy {
    * Inserts a StateUpdate.
    *
    * On success, returns:
-   * 
+   *
    *   {
    *     // If the state was inserted, the ID of the new row in the
    *     // state_updates table. Nothing will be inserted if the new state is
@@ -91,14 +91,28 @@ class PGMachinomy {
    *     status: StateUpdateStatus
    *     is_latest: true | false
    *     latest_state: StateUpdate of the latest state in the channel
-   *     channel_payment: eth (identical to latest_state.amount)
+   *     channel_payment: eth_amount (identical to latest_state.amount)
    *     // If a channel exists and has a value, `channel.value - latest_state.amount`.
-   *     channel_remaining_balance: null | eth
+   *     channel_remaining_balance: null | eth_amount
    *   }
+   *
+   * Where:
+   *
+   *   StateUpdate = {
+   *     id: int,
+   *     chain_id: int,
+   *     contract_id: eth_address,
+   *     chain_id: int,
+   *     ts: Date,
+   *
+   *     sequence_num: int,
+   *     amount: eth_amount,
+   *     signature: secp256k1_sig,
+   *  }
    *
    * On error, inserts the StateUpdate into the invalid_state_updates table
    * and returns:
-   *  
+   *
    *   {
    *     error: true,
    *     status: StateUpdateStatus
@@ -123,93 +137,183 @@ class PGMachinomy {
   }
 
   /**
-   * Inserts a Channel, setting the state to `CS_PENDING`.
+   * Gets the status of a channel, including the latest state and latest events.
+   *
+   * If `includeIntent` is set (the default), the result will include intent
+   * events and will reflect the intended state of the channel. Otherwise, only
+   * blockchain events will be used to determine the channel's stauts (ie, the
+   * result will be the channel as it exists on the blockchain). See also: the
+   * `channel.state_is_intent` field.
+   *
+   * If there have been conflicting events (for example, a `DidDeposit` event
+   * before a `DidCreateChannel` event), the `is_invalid` field will be set
+   * to `true`, and `is_invalid_reason` will be a developer-friendly
+   * description of the problem:
+   *
+   *   "invalid channel state for event DidDeposit: got NULL but should be CS_OPEN"
+   *
+   * If `is_invalid` is set, the status returned will be that of the channel
+   * *before* the invalid event.
+   *
+   * Note: it's possible for reorgs to put a channel into an inconsistent state
+   * without `is_invalid` being set. Consider, for example, a sitaution where
+   * two blocks contain a `DidDeposit` event, then one of those blocks is
+   * orphaned; the channel will have an incorrect value, but there's no way to
+   * detect this situation (until `setRecentBlocks` is called and the orphaned
+   * block is marked invalid).
    *
    * Returns:
    *
-   *   {
-   *     created: true | false (if channel with the same chain, contract, and channel exists)
+   *   ChannelStatus = {
    *     channel: Channel
+   *
+   *     // QUESTION: Are these useful?
+   *     latest_event: null | ChannelEvent | IntentEvent,
+   *     latest_intent_event: null | IntentEvent,
+   *     latest_chain_event: ChannelEvent
+   *
+   *     latest_state: null | StateUpdate,
+   *
+   *     // `current_payment` and `current_remaining_balance` are
+   *     // shortcuts for `current_payment = latest_state.amount` and
+   *     // `channel.value - current_payment`.
+   *     current_payment: null | eth_amount,
+   *     current_remaining_balance: null | eth_amount,
+   *
+   *     is_invalid: boolean,
+   *     is_invalid_reason: null | developer-friendly reason
    *   }
    *
    * Where:
    *
    *   Channel = {
-   *     id: integer,
-   *     chain_id: integer,
+   *     chain_id: int,
    *     contract_id: eth_address,
-   *     channel_id: eth_address,
+   *     channel_id: sha3_hash,
+   *
+   *     sender: null | eth_address,
+   *     receiver: null | eth_address,
+   *     value: null | eth_amount,
+   *     settlement_period: null | int,
+   *     until: null | timestamp,
+   *
+   *     payment: null | eth_amount,
+   *     odd_value: null | eth_amount,
+   *
+   *     // If any of the events related to this channel are intent events,
+   *     // state_is_intent will be true, meaning the state represented here isn't
+   *     // yet confirmed on the blockchain.
+   *     state_is_intent: null | boolean,
+   *     state: null | 'CS_OPEN' | 'CS_SETTLING' | 'CS_SETTLED',
+   *
+   *     opened_on: null | timestamp,
+   *     settlement_started_on: null | timestamp,
+   *     settlement_finalized_on: null | timestamp
+   *   }
+   *
+   */
+  getChannel(channel, includeIntent=true) {
+    return this._queryOne('res', SQL`
+      SELECT mcy_get_channel(${channel}, ${includeIntent}) AS res
+    `);
+  }
+
+  /**
+   * Inserts a ChannelEvent and returns the new channel.
+   *
+   *   ChannelEvent = {
+   *     chain_id: int,
+   *     contract_id: eth_address,
+   *     channel_id: sha3_hash,
+   *     ts: timestamp,
+   *
+   *     block_number: int,
+   *     block_hash: sha3_hash,
+   *     // `block_is_valid` will be `false` if `setRecentBlocks` has rendered
+   *     // this event's block invalid (orphaned).
+   *     // This field is ingnored when inserting an event.
+   *     block_is_valid: boolean,
    *
    *     sender: eth_address,
-   *     receiver: eth_address,
-   *     value: null | eth,
-   *     settlement_period: null | integer,
-   *     payment: null | eth,
-   *
-   *     status: 'CS_PENDING' | 'CS_OPEN' | 'CS_SETTLING' | 'CS_SETTLED'
-   *     opened_on: null | timestamp
-   *     settlement_started_on: null | timestamp,
-   *     settlement_finalized_on: null | timestamp,
+   *     event_type: 'DidCreateChannel' | 'DidDeposit' | 'DidStartSettle' | 'DidSettle'
+   *     fields: { event-specifc fields (ex, `value` when `event_type` is 'DidDeposit') }
    *  }
-   */
-  insertChannel(channel) {
-    return this._queryOne('res', SQL`
-      SELECT mcy_insert_channel(${channel}) AS res
-    `);
-  }
-
-  /**
-   * Gets a channel's state.
-   *
-   * Returns:
-   *
-   *   {
-   *     channel: Channel,
-   *     latest_state: StateUpdate,
-   *     // The payment and remaining balance will be set and non-null if
-   *     // the channel a value and there's a latest_state.
-   *     current_payment: null | eth,
-   *     current_remaining_balance: null | eth,
-   *   }
-   */
-  getChannelState(channel) {
-    return this._queryOne('res', SQL`
-      SELECT mcy_get_channel_state(${channel}) AS res
-    `);
-  }
-
-  /**
-   * Inserts a ChannelEvent and updates the channel's state (value, status,
-   * etc) accordingly.
-   *
-   * Check that it's sensible to transition the event's channel into the new
-   * state (ex, it's sensible to transition from CS_OPEN to CS_PENDING, but
-   * it isn't sensbile to transition from CS_PENDING to CS_OPEN), but does
-   * _not_ check whether the event is consistent (ex, does not check whether
-   * a payment is greater than the channel's value).
-   *
-   * On success, returns: Channel
-   *
-   * On error, inserts the invalid event into the invalid_channel_events table
-   * and returns:
-   *
-   *   {
-   *     error: true,
-   *     reason: 'developer friendly error message',
-   *     type: 'invalid_channel_status' | 'invalid_event_type',
-   *     
-   *     when type = 'invalid_channel_status':
-   *       expected_statuses: [ChannelStatus, ...],
-   *       actaul_status: ChannelStatus
-   *
-   *     when type = 'invalid_event_type':
-   *       expected_types: [EventType, ...],
-   *       actual_type: EventType,
-   *   }
    */
   insertChannelEvent(event) {
     return this._queryOne('res', SQL`
       SELECT mcy_insert_channel_event(${event}) AS res
+    `);
+  }
+
+  /**
+   * Inserts an IntentEvent. IntentEvents have a structure identical to
+   * ChannelEvents, but are used to signify that the caller *intends* to
+   * perform some action so the database can correctly reflect the state
+   * we expect once the real event gets to the blockchain.
+   *
+   *   IntentEvents = {
+   *     chain_id: int,
+   *     contract_id: eth_address,
+   *     channel_id: sha3_hash,
+   *     ts: timestamp,
+   *
+   *     // The last block number seen at the time this event was created. Used
+   *     // so intent events can be correctly ordered along side
+   *     // blockchain-based ChannelEvent.
+   *     block_number: int,
+   *
+   *     sender: eth_address,
+   *     event_type: 'DidCreateChannel' | 'DidDeposit' | 'DidStartSettle' | 'DidSettle'
+   *     fields: { event-specifc fields (ex, `value` when `event_type` is 'DidDeposit') }
+   *  }
+   */
+  insertChannelIntent(intent) {
+    return this._queryOne('res', SQL`
+      SELECT mcy_insert_channel_intent(${intent}) AS res
+    `);
+  }
+
+  /**
+   * Handle chain reorgs by setting the most recently seen blocks. Events which
+   * are in blocks that are now orphaned will be removed, and events which may
+   * have been in previously orphaned blocks are restored.
+   *
+   * The `firstBlockNum` should be the number of the first block in
+   * `blockHashes`.
+   *
+   * Returns a list of the channels which have changed in light of this update
+   * (see the result of `getChannel`).
+   *
+   * For example:
+   *
+   *   > setRecentBlocks(1, 100, ["abc123", "fff456", ...])
+   *   {
+   *     // The number of events that were updated (nb, many events in one
+   *     // channel may have been updated).
+   *     updated_event_count: 3,
+   *     updated_channels: [ ChannelStatus, ... ],
+   *   }
+   *
+   */
+  setRecentBlocks(chainId, firstBlockNum, blockHashes) {
+    return this._queryOne('res', SQL`
+      SELECT mcy_set_recent_blocks(${chainId}, ${firstBlockNum}, ${blockHashes}) as res;
+    `);
+  }
+
+  /**
+   * Returns all of the events for a particular channel in order, oldest to
+   * newest.
+   *
+   * If `includeIntent` is `true` (default), intent events will be included.
+   *
+   * Returns:
+   *
+   *   [ ChannelEvent | IntentEvent, ... ]
+   */
+  getChannelEvents(chan, includeIntent=true) {
+    return this._query(SQL`
+      SELECT * FROM mcy_get_channel_events(${chan}, ${includeIntent});
     `);
   }
 
