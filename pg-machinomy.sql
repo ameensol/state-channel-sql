@@ -11,8 +11,8 @@ check ( length(value) = 64 );
 -- hopefully we'll never need to store more than 1e(1000-18) either...
 create domain mcy_eth as numeric(1000, 18);
 
-create domain mcy_secp256k1_sig as varchar(128)
-check ( length(value) = 128 );
+create domain mcy_secp256k1_sig as varchar(130)
+check ( length(value) = 130 );
 
 
 --
@@ -99,7 +99,8 @@ create table channel_events (
     channel_id mcy_sha3_hash not null,
     ts timestamp not null,
 
-    block mcy_sha3_hash not null,
+    block_number bigint not null,
+    block_hash mcy_sha3_hash not null,
     sender mcy_eth_address not null,
     event_type mcy_channel_event_type not null,
 
@@ -446,7 +447,7 @@ begin
         );
     end if;
 
-    if (status->>'dupe_status' = 'distinct') then
+    if (status->>'dupe_status') = 'distinct' then
         declare
             err_msg text;
         begin

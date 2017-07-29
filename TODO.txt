@@ -1,9 +1,5 @@
 - Check that pg function signatures are sensible (ex, should immutable, strict, etc be added?)
 
-- Test for the different "states are invalid" results of inserting
-    - duplicate sequence
-    - etc...
-
 - Replace the placeholder implementations of:
     - mcy_state_update_is_signature_valid
     - mcy_check_state_update
@@ -16,28 +12,23 @@
         channel_hash mcy_sha3_hash
     )
 
-- XXX: Can't get settlement period from channel create event
-
 - Somehow translate between the values coming from Web3 with the values we're
   expecting.
     - Will values be in wei or eth? (I think wei, but need to be sure)
     - Convert Web3 events into ChannelEvent (esp getting the block hash,
       timestamp, etc)
 
-
-- Note: event inserting only sanity checks the internal channel state and does
-  *not* check that the event is consistent (ex, it checks that we aren't trying
-  to settle a closed channel, but it does *not* check whether the payment is
-  greater than the channel's value).
-
 - TODO: include the channel's remaining value in the `latest_state` message.
 
-
-- Should a state update be rejected if its value is larger than the channel's?
-
-
-- Make sure that `mcy_insert_invalid_state_update` has locking or whatever to
+- Make sure that `mcy_insert_state_update` has locking or whatever to
   enforce serialization
 
-
 - License, name, etc in package.json
+
+- Ongoing maintanence and update workflow
+
+
+Changes as of Jul 28 conversation:
+- Make channels purely aggregate
+- Add the "set blockchain state" function
+- Introduce the the notion of "pending" events
