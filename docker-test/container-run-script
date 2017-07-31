@@ -1,0 +1,24 @@
+#!/bin/bash
+# STOP! Before going any further, think: are you going to regret the decision
+# to write this script?
+#     Deciding to write this in bash was not one of my better decisions.
+#     -- https://twitter.com/alex_gaynor/status/369892494114164736
+
+IFS="`printf "\n\t"`"
+set -eu
+cd "$(dirname "$0")"
+
+su postgres -c "pg_ctl -l /tmp/pg-log -D /var/pgsql-9.6/ start"
+
+mkdir /code
+for f in /code-raw/*; do
+    bn="$(basename "$f")"
+    if [[ "$bn" == "node_modules" || "$bn" == ".git" ]]; then
+        continue
+    fi
+    cp -r "$f" /code/
+done
+
+cd /code/
+npm install
+su postgres -c "npm run test-once"

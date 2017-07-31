@@ -32,7 +32,7 @@ describe('PGMachinomy', () => {
   before(async () => {
     // Ignore any errors here, they'll be checked when we create the DB
     let cxn = new PgAsync(update(TEST_DB, { database: 'postgres' }))
-    await cxn.query(`DROP DATABASE "${TEST_DB.database}"`);
+    await cxn.query(`DROP DATABASE "${TEST_DB.database}"`).then(null, () => {});
     await cxn.query(`CREATE DATABASE "${TEST_DB.database}"`);
 
     pgm = new m.PGMachinomy(TEST_DB);

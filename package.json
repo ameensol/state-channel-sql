@@ -5,7 +5,8 @@
     "mocha": "^3.4.2"
   },
   "scripts": {
-    "test": "mocha -w --watch-extensions sql --inspect"
+    "test": "mocha -w --watch-extensions sql --inspect",
+    "test-once": "mocha"
   },
   "dependencies": {
     "pg-async": "^2.4.3"
