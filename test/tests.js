@@ -2,9 +2,9 @@ var chai = require('chai');
 var chaiSubset = require('chai-subset');
 chai.use(chaiSubset);
 
-let SQL = require('pg-async').SQL;
+let _pga = require('pg-async');
+let [PgAsync, SQL] = [_pga['default'], _pga.SQL];
 
-let pgtools = require('pgtools');
 let assert = require('chai').assert;
 
 let m = require('../pg-machinomy');
@@ -31,9 +31,9 @@ describe('PGMachinomy', () => {
 
   before(async () => {
     // Ignore any errors here, they'll be checked when we create the DB
-    let cxn = update(TEST_DB, { database: undefined });
-    await pgtools.dropdb(cxn, TEST_DB.database).then(null, () => {});
-    await pgtools.createdb(cxn, TEST_DB.database);
+    let cxn = new PgAsync(update(TEST_DB, { database: 'postgres' }))
+    await cxn.query(`DROP DATABASE "${TEST_DB.database}"`);
+    await cxn.query(`CREATE DATABASE "${TEST_DB.database}"`);
 
     pgm = new m.PGMachinomy(TEST_DB);
     let res = await pgm.setupDatabase();
@@ -75,16 +75,14 @@ describe('PGMachinomy', () => {
   }, x || {});
 
   let expectedDbState = update(testChannel, {
-    'id': 1,
     'amount': 1.23,
     'sequence_num': 1,
     'signature': 'signature-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx',
-    'ts': '1969-12-31T19:20:34'
   });
 
   it('Check state update: simple', async () => {
     let res = await pgm.getStateUpdateStatus(testStateUpdate());
-    assert.deepEqual(res, {
+    assert.containSubset(res, {
       'signature_valid': true,
       'is_latest': true,
       'dupe_status': 'distinct',
@@ -94,8 +92,7 @@ describe('PGMachinomy', () => {
   it('Insert state update: valid', async () => {
     let res = await pgm.insertStateUpdate(testStateUpdate());
 
-    assert.deepEqual(res, {
-      'id': 1,
+    assert.containSubset(res, {
       'created': true,
       'status': {
         'signature_valid': true,
@@ -112,7 +109,7 @@ describe('PGMachinomy', () => {
   it('Insert state update: invalid: bad data', async () => {
     let res = await pgm.insertStateUpdate(testStateUpdate({ 'contract_id': 'invalid' }));
 
-    assert.deepEqual(res, {
+    assert.containSubset(res, {
       'error': true,
       'reason': 'invalid_state: value for domain mcy_eth_address violates check constraint "mcy_eth_address_check"',
       'status': {
@@ -126,10 +123,10 @@ describe('PGMachinomy', () => {
   it('Get latest state', async () => {
     await pgm.insertStateUpdate(testStateUpdate());
 
-    assert.deepEqual(await pgm.getLatestState(testChannel), update(expectedDbState, { id: 2 }));
+    assert.containSubset(await pgm.getLatestState(testChannel), update(expectedDbState, { id: 2 }));
 
     await pgm.insertStateUpdate(testStateUpdate({ amount: 2.34, sequence_num: 2 }));
-    assert.deepEqual(await pgm.getLatestState(testChannel), update(expectedDbState, {
+    assert.containSubset(await pgm.getLatestState(testChannel), update(expectedDbState, {
       'id': 3,
       'amount': 2.34,
       'sequence_num': 2,

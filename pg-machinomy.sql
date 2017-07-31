@@ -1,4 +1,9 @@
 --
+-- Setup extensions
+--
+create extension if not exists hstore;
+
+--
 -- Data types
 --
 
