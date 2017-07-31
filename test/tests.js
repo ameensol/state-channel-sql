@@ -123,11 +123,10 @@ describe('PGMachinomy', () => {
   it('Get latest state', async () => {
     await pgm.insertStateUpdate(testStateUpdate());
 
-    assert.containSubset(await pgm.getLatestState(testChannel), update(expectedDbState, { id: 2 }));
+    assert.containSubset(await pgm.getLatestState(testChannel), expectedDbState);
 
     await pgm.insertStateUpdate(testStateUpdate({ amount: 2.34, sequence_num: 2 }));
     assert.containSubset(await pgm.getLatestState(testChannel), update(expectedDbState, {
-      'id': 3,
       'amount': 2.34,
       'sequence_num': 2,
     }));
