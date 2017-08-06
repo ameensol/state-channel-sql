@@ -169,7 +169,7 @@ describe('PGMachinomy', () => {
   });
 
   it('Get channel: empty', async () => {
-    let res = await pgm.getChannel(testChannel)
+    let res = await pgm.getChannelStatus(testChannel)
     assert.containSubset(res, {
       channel: null,
       latest_event: null,
@@ -185,7 +185,7 @@ describe('PGMachinomy', () => {
     await pgm.insertChannelEvent(update(didDepositChannelEvent, { fields: { value: 5 }}));
     await pgm.insertStateUpdate(testStateUpdate({ amount: 1.5 }));
 
-    res = await pgm.getChannel(testChannel)
+    res = await pgm.getChannelStatus(testChannel)
     assert.containSubset(res, {
       channel: {
         state: 'CS_OPEN',
@@ -213,10 +213,15 @@ describe('PGMachinomy', () => {
       current_remaining_balance: 3.5,
     });
 
-    await pgm.insertStateUpdate(testStateUpdate({ amount: 3.0 }));
+    res = await pgm.insertStateUpdate(testStateUpdate({ amount: 3 }));
+    assert.containSubset(res, {
+      'channel_payment': 3,
+      'channel_remaining_balance': 2,
+    });
+
     await pgm.insertChannelIntent(update(didStartSettleEvent));
 
-    res = await pgm.getChannel(testChannel);
+    res = await pgm.getChannelStatus(testChannel);
     assert.containSubset(res, {
       channel: {
         state: 'CS_SETTLING',
@@ -306,7 +311,7 @@ describe('PGMachinomy', () => {
     await insertEvent(didDepositChannelEvent, 2, 'b', { value: 1 });
     await insertEvent(didDepositChannelEvent, 3, 'c', { value: 2 });
 
-    res = await pgm.getChannel(testChannel);
+    res = await pgm.getChannelStatus(testChannel);
     assert.containSubset(res, { channel: { value: 3 }});
 
     res = await pgm.setRecentBlocks(testChannel.chain_id, 1, ['a', 'b'].map(mkhash));
@@ -335,7 +340,7 @@ describe('PGMachinomy', () => {
       sender: 's2-' + 'x'.repeat(37),
     }));
 
-    let res = await pgm.getChannel(testChannel);
+    let res = await pgm.getChannelStatus(testChannel);
     assert.containSubset(res, {
       is_invalid: true,
       is_invalid_reason: 'invalid channel state for event DidCreateChannel: got CS_OPEN but should be NULL',

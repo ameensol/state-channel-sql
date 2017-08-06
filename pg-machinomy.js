@@ -212,9 +212,9 @@ class PGMachinomy {
    *   }
    *
    */
-  getChannel(channel, includeIntent=true) {
+  getChannelStatus(channel, includeIntent=true) {
     return this._queryOne('res', SQL`
-      SELECT mcy_get_channel(${channel}, ${includeIntent}) AS res
+      SELECT mcy_get_channel_status(${channel}, ${includeIntent}) AS res
     `);
   }
 
@@ -282,7 +282,7 @@ class PGMachinomy {
    * `blockHashes`.
    *
    * Returns a list of the channels which have changed in light of this update
-   * (see the result of `getChannel`).
+   * (see the result of `getChannelStatus`).
    *
    * For example:
    *

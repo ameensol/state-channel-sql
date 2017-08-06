@@ -226,7 +226,7 @@ begin
         fields
     );
 
-    return mcy_get_channel(event, true);
+    return mcy_get_channel_status(event, true);
 end
 $pgsql$;
 
@@ -265,7 +265,7 @@ begin
     set block_hash = mcy_get_intent_block_hash(new_intent)
     where id = new_intent.id;
 
-    return mcy_get_channel(intent, true);
+    return mcy_get_channel_status(intent, true);
 end
 $pgsql$;
 
@@ -323,7 +323,7 @@ begin
     return json_build_object(
         'updated_event_count', updated_event_count,
         'updated_channels', array((
-            select mcy_get_channel(chan, false)
+            select mcy_get_channel_status(chan, false)
             from unnest(updated_contracts_list) as x(chan)
         ))
     );
@@ -398,47 +398,63 @@ language sql as $$
 $$;
 
 
+create type mcy_get_channel_result as (
+    channel mcy_channel,
+    latest_intent_event channel_events,
+    latest_chain_event channel_events,
+    latest_event channel_events,
+
+    is_invalid bool,
+    is_invalid_reason text
+);
+
 create function mcy_get_channel(chan jsonb, include_intent boolean)
-returns jsonb
+returns mcy_get_channel_result
 language plpgsql as $pgsql$
 declare
-    channel mcy_channel;
-
-    apply_res record;
+    res mcy_get_channel_result;
     event channel_events;
-    latest_intent_event channel_events;
-    latest_chain_event channel_events;
-
-    is_invalid boolean := null;
-    is_invalid_reason text := null;
-
-    latest_state state_updates;
+    apply_res record;
 begin
-    channel := null;
-    event := null;
-    latest_intent_event := null;
-    latest_chain_event := null;
-
     for event in (select * from mcy_get_channel_events(chan, include_intent)) loop
+        res.latest_event = event;
         if event.block_hash is null then
-            latest_intent_event := event;
+            res.latest_intent_event := event;
         else
-            latest_chain_event := event;
+            res.latest_chain_event := event;
         end if;
 
-        apply_res := mcy_channel_apply_event(channel, event);
+        apply_res := mcy_channel_apply_event(res.channel, event);
 
-        is_invalid := apply_res.is_invalid;
-        is_invalid_reason := apply_res.is_invalid_reason;
+        res.is_invalid := apply_res.is_invalid;
+        res.is_invalid_reason := apply_res.is_invalid_reason;
 
-        if is_invalid then
+        if res.is_invalid then
             exit;
         else
-            channel = apply_res.new_channel;
+            res.channel = apply_res.new_channel;
         end if;
 
     end loop;
 
+    return res;
+end
+$pgsql$;
+
+
+create function mcy_get_channel_status(chan jsonb, include_intent boolean)
+returns jsonb
+language plpgsql as $pgsql$
+declare
+    cr mcy_get_channel_result;
+    latest_event channel_events;
+    latest_intent_event channel_events;
+    latest_state state_updates;
+
+    channel mcy_channel;
+begin
+    cr := mcy_get_channel(chan, include_intent);
+    channel := cr.channel;
     latest_state := mcy_get_latest_state_update(chan);
 
     return json_build_object(
@@ -448,12 +464,12 @@ begin
         'current_payment', latest_state.amount,
         'current_remaining_balance', channel.value - latest_state.amount,
 
-        'latest_event', mcy_null_row_to_json(event),
-        'latest_intent_event', mcy_null_row_to_json(latest_intent_event),
-        'latest_chain_event', mcy_null_row_to_json(latest_chain_event),
+        'latest_event', mcy_null_row_to_json(cr.latest_event),
+        'latest_intent_event', mcy_null_row_to_json(cr.latest_intent_event),
+        'latest_chain_event', mcy_null_row_to_json(cr.latest_chain_event),
 
-        'is_invalid', is_invalid,
-        'is_invalid_reason', is_invalid_reason
+        'is_invalid', cr.is_invalid,
+        'is_invalid_reason', cr.is_invalid_reason
     );
 
 end
@@ -570,7 +586,7 @@ language sql as $$
     select row_to_json(state_update)::jsonb;
 $$;
 
-create function mcy_insert_state_update(state_update jsonb)
+create function mcy_insert_state_update(state_update jsonb, include_intent bool default true)
 returns jsonb
 language plpgsql as $pgsql$
 declare
@@ -578,7 +594,7 @@ declare
 
     new_row state_updates;
     latest_state state_updates;
-    remaining_balance mcy_eth;
+    channel mcy_channel;
 begin
     -- TODO: make sure we're doing the appropriate locking here so that
     -- state updates are serialized.
@@ -627,6 +643,8 @@ begin
         end
     );
 
+    channel := (mcy_get_channel(state_update, include_intent)).channel;
+
     return json_build_object(
         'id', new_row.id,
         'created', (new_row.id is not null),
@@ -634,7 +652,7 @@ begin
         'is_latest', status->'is_latest',
         'latest_state', (mcy_state_update_row_to_json(latest_state)),
         'channel_payment', latest_state.amount,
-        'channel_remaining_balance', remaining_balance
+        'channel_remaining_balance', channel.value - latest_state.amount
     );
 end
 $pgsql$;
@@ -694,7 +712,7 @@ $pgsql$;
 
 create function mcy_null_row_to_json(r anyelement)
 returns jsonb
-language plpgsql as $pgsql$
+language plpgsql immutable as $pgsql$
 begin
     if r is null then
         return 'null'::jsonb;
