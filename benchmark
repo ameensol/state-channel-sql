@@ -1,0 +1,237 @@
+#!/usr/bin/env node
+/*
+ * Notes on interpreted the results of this script:
+ *
+ * - When there's more than one "thread", a portion of the measured time will
+ *   be Node processing some other event while the response from Postgres is
+ *   waiting in the event queue, so the numbers should be understood as a
+ *   guaranteed lower bound.
+ *
+ * - To get the most accurate numbers, run a second (or third, or n-th)
+ *   benchmark script with only one thread, then use those numbers.
+ *
+ * For example:
+ *
+ *   terminal-1$ ./benchmark
+ *   ...
+ *   terminal-2$ ./benchmark -D
+ *   ...
+ *   terminal-3: ./benchmark -D -c1 <--- use the numbers from this one
+ *   ...
+ *
+ * Presently - Aug 6, 2017 - with 19 active threads, these are the most
+ * accurate numbers (three Node processes: two with 9 threads each, and a third
+ * with one thread, from which the numbers were taken; there were ~5m state
+ * updates in the database at the time these numbers were taken):
+ *
+ *   0 events: 604 updates/s mean=1.66ms std=±1.79ms 90th=2.45ms 95th=3.27ms 99th=5.32ms
+ *   1 events: 628 updates/s mean=1.59ms std=±2.64ms 90th=2.10ms 95th=3.08ms 99th=5.02ms
+ *   2 events: 637 updates/s mean=1.57ms std=±1.87ms 90th=2.54ms 95th=3.35ms 99th=5.60ms
+ *   3 events: 642 updates/s mean=1.56ms std=±2.12ms 90th=2.20ms 95th=3.11ms 99th=5.54ms
+ *   0 events: 692 updates/s mean=1.45ms std=±1.61ms 90th=1.93ms 95th=2.88ms 99th=4.74ms
+ *   1 events: 621 updates/s mean=1.61ms std=±2.10ms 90th=2.38ms 95th=3.31ms 99th=5.50ms
+ *   2 events: 636 updates/s mean=1.57ms std=±2.06ms 90th=2.25ms 95th=3.14ms 99th=5.48ms
+ *   3 events: 629 updates/s mean=1.59ms std=±1.93ms 90th=2.35ms 95th=3.20ms 99th=5.51ms
+ *   0 events: 637 updates/s mean=1.57ms std=±2.01ms 90th=2.37ms 95th=3.33ms 99th=5.56ms
+ *   1 events: 629 updates/s mean=1.59ms std=±2.28ms 90th=2.36ms 95th=3.17ms 99th=5.24ms
+ *   2 events: 656 updates/s mean=1.52ms std=±1.93ms 90th=2.06ms 95th=3.04ms 99th=5.22ms
+ *   3 events: 624 updates/s mean=1.60ms std=±2.10ms 90th=2.22ms 95th=3.06ms 99th=5.55ms
+ *
+ * TODO: make it possible to do that directly from this script.
+ */
+
+let _pga = require('pg-async');
+let [PgAsync, SQL] = [_pga['default'], _pga.SQL];
+
+let { ArgumentParser } = require('argparse');
+let { Stats } = require('fast-stats');
+
+let m = require('./pg-machinomy');
+
+let TEST_DB = {
+  host: 'localhost',
+  database: 'pg-machinomy-benchmark',
+};
+
+let update = (...args) => Object.assign({}, ...args);
+
+let hrtime2ms = hrt => {
+  return hrt[0] * 1e3 + hrt[1] / 1e6;
+};
+
+
+async function initDB() {
+  if (args.no_drop)
+    return;
+
+  let cxn = new PgAsync(update(TEST_DB, { database: 'postgres' }))
+  await cxn.query(`DROP DATABASE IF EXISTS "${TEST_DB.database}"`);
+  await cxn.query(`CREATE DATABASE "${TEST_DB.database}"`);
+
+  let pgm = new m.PGMachinomy(TEST_DB);
+  await pgm.setupDatabase();
+  pgm.close();
+}
+
+
+async function runBenchmarkThread(reportCb, threadNum) {
+  let now = () => new Date() / 1000;
+
+  let zpad = (prefix, totalLength) => {
+    prefix = `${prefix}-${threadNum}-`;
+    return prefix + '0'.repeat(totalLength - prefix.length);
+  };
+
+  let mkEvents = chanId => {
+    let baseChan = {
+      chain_id: 1,
+      contract_id: zpad(`contract-${process.pid}`, 40),
+      channel_id: zpad(`chan-${chanId}`, 64),
+    };
+
+    let ts = now();
+    let blockNum = 0;
+
+    let mkEvent = (type, fields) => {
+      blockNum += 1;
+      return update(baseChan, {
+        ts: ts++,
+        block_number: blockNum,
+        block_hash: zpad(`block-${blockNum}`, 64),
+        sender: zpad(`sender`, 40),
+        event_type: type,
+        fields: fields,
+      });
+    };
+
+    return {
+      chan: baseChan,
+      events: [
+        mkEvent('DidCreateChannel', {
+          sender: zpad(`sender`, 40),
+          receiver: zpad(`receiver`, 40),
+          settlement_period: 60,
+          until: ts + (60 * 60 * 24),
+        }),
+
+        mkEvent('DidDeposit', {
+          value: 100,
+        }),
+
+        mkEvent('DidStartSettle', {
+          payment: 20,
+        }),
+
+        mkEvent('DidSettle', {
+          payment: 30,
+        }),
+      ],
+    };
+  };
+
+  // To check:
+  // - Perf at each state
+  // - Perf as number of updates grows
+  // - What happens with random channel numbers?
+  // 
+  // Later:
+  // - What's the perf when intents get involved?
+
+  let NUM_LOOPS = 100;
+  let NUM_UPDATES = 10000;
+
+  let pgm = new m.PGMachinomy(TEST_DB);
+  for (let loopNum = 0; loopNum < NUM_LOOPS; loopNum += 1) {
+    let { chan, events } = mkEvents(loopNum);
+    let toApply = loopNum % events.length;
+    await Promise.all(events.slice(0, toApply).map(event => {
+      // Events can be inserted out of order, so the ordering isn't
+      // especially important here.
+      return pgm.insertChannelEvent(event);
+    }));
+
+    let updateTimes = new Stats();
+    for (let updateNum = 0; updateNum < NUM_UPDATES; updateNum += 1) {
+      let stateUpdate = update(chan, {
+        ts: now(),
+        sequence_num: updateNum,
+        amount: updateNum / NUM_UPDATES,
+        signature: zpad('sig', 130),
+      });
+
+      let startTime = process.hrtime();
+      await pgm.insertStateUpdate(stateUpdate);
+      let duration = process.hrtime(startTime);
+      updateTimes.push(hrtime2ms(duration));
+    }
+    reportCb(threadNum, updateTimes, toApply);
+  };
+  pgm.close();
+
+}
+
+async function run() {
+  console.log("Note: see comments at the top of this script before looking at these numbers!");
+  let numReports = 0;
+  let updatesPerThreadPerSec = [];
+  function showReport(threadNum, updateTimes, toApply) {
+    let updateDuration = 0;
+    updateTimes.data.forEach(x => updateDuration += x);
+    updatesPerThreadPerSec[threadNum] = (updateTimes.length / updateDuration) * 1000;
+
+    let totalUpdatesPerSec = 0;
+    updatesPerThreadPerSec.forEach(threadUpdates => {
+      if (!threadUpdates)
+        return;
+      totalUpdatesPerSec += threadUpdates;
+    });
+
+    console.log(
+      `${threads.length} threads: ${threadNum}: ${toApply} events: ` +
+      `${totalUpdatesPerSec.toFixed(0)} updates/s ` +
+      `mean=${updateTimes.amean().toFixed(2)}ms ` +
+      `std=±${updateTimes.stddev().toFixed(2)}ms ` +
+      `90th=${updateTimes.percentile(90).toFixed(2)}ms ` +
+      `95th=${updateTimes.percentile(95).toFixed(2)}ms ` +
+      `99th=${updateTimes.percentile(99).toFixed(2)}ms`
+    );
+
+    numReports += 1;
+    startNextThread();
+  }
+
+  let threads = [];
+  function startNextThread() {
+    if (numReports < (3 * threads.length))
+      return;
+    if (threads.length >= args.concurrency)
+      return;
+    threads.push(runBenchmarkThread(showReport, threads.length + 20));
+    numReports = 0;
+  };
+
+  await initDB();
+  startNextThread();
+  return new Promise(() => {});
+}
+
+let parser = new ArgumentParser({
+  description: 'Benchmark pg-machinomy',
+});
+
+parser.addArgument(['-c', '--concurrency'], {
+  help: 'Number of concurrent connections (single-threaded in JS)',
+  defaultValue: 9,
+  type: 'int',
+});
+
+parser.addArgument(['-D', '--no-drop'], {
+  help: `Don't drop the benchmark database before starting; useful for running multiple tests concurrently.`,
+  destination: 'no_drop',
+  action: 'storeTrue',
+});
+
+let args = parser.parseArgs();
+
+process.on('unhandledRejection', r => console.log(r));
+run();

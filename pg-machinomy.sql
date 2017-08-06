@@ -215,7 +215,7 @@ begin
         (event->>'contract_id')::mcy_eth_address,
         (event->>'channel_id')::mcy_sha3_hash,
 
-        to_timestamp((event->>'ts')::int),
+        to_timestamp((event->>'ts')::float),
 
         (event->>'block_hash')::mcy_sha3_hash,
         (event->>'block_number')::int,
@@ -490,7 +490,7 @@ begin
         channel.sender = (fields->>'sender')::mcy_eth_address;
         channel.receiver = (fields->>'receiver')::mcy_eth_address;
         channel.settlement_period = (fields->>'settlement_period')::int;
-        channel.until = to_timestamp((fields->>'until')::int);
+        channel.until = to_timestamp((fields->>'until')::float);
         channel.value = 0;
     elsif event_type = 'DidDeposit' then
         is_invalid_reason := mcy_assert_channel_state(event_type, channel, 'CS_OPEN');
@@ -611,7 +611,7 @@ begin
                 (state_update->>'chain_id')::int as chain_id,
                 (state_update->>'contract_id')::mcy_eth_address as contract_id,
                 (state_update->>'channel_id')::mcy_sha3_hash as channel_id,
-                to_timestamp((state_update->>'ts')::int) as ts,
+                to_timestamp((state_update->>'ts')::float) as ts,
                 (state_update->>'sequence_num')::int as sequence_num,
                 (state_update->>'amount')::mcy_eth as amount,
                 (state_update->>'signature')::mcy_secp256k1_sig as signature

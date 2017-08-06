@@ -50,3 +50,12 @@ Questions:
 - Is it possible for a reorg to make the chain shorter (ie, is the assumption
   that the intent event's block_number will always be <= the event which
   contains the actual event valid?)
+
+
+Performance Improvements
+========================
+- Try adding an index on state_updates which includes the price so PG 9.6 can
+  do an index-only scan:
+
+    create index state_updates_chain_contract_chan_seq_amt_idx
+    on state_updates (chain_id, contract_id, channel_id, sequence_num, amount);
