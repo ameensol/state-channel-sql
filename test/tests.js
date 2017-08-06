@@ -46,7 +46,6 @@ describe('PGMachinomy', () => {
       truncate table invalid_state_updates cascade;
       truncate table channel_events cascade;
       truncate table channel_intents cascade;
-      truncate table channels_cache cascade;
     `);
   });
 

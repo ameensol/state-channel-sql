@@ -341,18 +341,13 @@ create type mcy_channel_state as enum (
     'CS_SETTLED'   -- Channel has been settled
 );
 
--- The 'channels' table is purely aggregate and should not be written to
--- directly. It will be updated by `mcy_refresh_channel(chan)`
+create type mcy_channel as (
+    chain_id int,
+    contract_id mcy_eth_address,
+    channel_id mcy_sha3_hash,
 
-create table channels_cache (
-    id bigserial primary key,
-
-    chain_id int not null,
-    contract_id mcy_eth_address not null,
-    channel_id mcy_sha3_hash not null,
-
-    last_state_id bigint references state_updates(id),
-    last_event_id bigint references channel_events(id),
+    last_state_id bigint,
+    last_event_id bigint,
 
     sender mcy_eth_address,
     receiver mcy_eth_address,
@@ -370,6 +365,7 @@ create table channels_cache (
     settlement_started_on timestamp,
     settlement_finalized_on timestamp
 );
+
 
 -- Returns all of the events that pertain to a channel in their canonical order
 -- (ie, oldest first), excluding events from blocks known to be orphaned. If
@@ -406,7 +402,7 @@ create function mcy_get_channel(chan jsonb, include_intent boolean)
 returns jsonb
 language plpgsql as $pgsql$
 declare
-    channel channels_cache;
+    channel mcy_channel;
 
     apply_res record;
     event channel_events;
@@ -465,8 +461,8 @@ $pgsql$;
 
 
 create function mcy_channel_apply_event(
-    in channel channels_cache, in event channel_events,
-    out new_channel channels_cache, out is_invalid boolean, out is_invalid_reason text
+    in channel mcy_channel, in event channel_events,
+    out new_channel mcy_channel, out is_invalid boolean, out is_invalid_reason text
 )
 returns record
 language plpgsql as $pgsql$
@@ -518,7 +514,7 @@ end
 $pgsql$;
 
 
-create function mcy_assert_channel_state(event_type text, channel channels_cache, a text, b text default null)
+create function mcy_assert_channel_state(event_type text, channel mcy_channel, a text, b text default null)
 returns text
 language plpgsql as $pgsql$
 declare
