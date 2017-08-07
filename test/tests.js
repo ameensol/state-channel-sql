@@ -16,18 +16,19 @@ let TEST_DB = {
 
 let update = (...args) => Object.assign({}, ...args);
 
-let mkhash = (prefix="") => {
-  prefix = 'hash-' + prefix + '-';
-  return prefix + '0'.repeat(64 - prefix.length);
-}
+let mkrpad = len => (prefix='') => {
+  return prefix + '0'.repeat(len - prefix.length);
+};
 
-let mkchanid = (prefix="") => {
-  prefix = 'channel-' + prefix + '-';
-  return prefix + '0'.repeat(64 - prefix.length);
-}
+let mkhash = mkrpad(64);
+let mkchanid = mkrpad(64);
+let mkcontractid = mkrpad(40);
+let mksig = mkrpad(130);
 
 describe('PGMachinomy', () => {
   let pgm;
+
+  let realValidateSignatureFunctions;
 
   before(async () => {
     // Ignore any errors here, they'll be checked when we create the DB
@@ -36,7 +37,29 @@ describe('PGMachinomy', () => {
     await cxn.query(`CREATE DATABASE "${TEST_DB.database}"`);
 
     pgm = new m.PGMachinomy(TEST_DB);
-    let res = await pgm.setupDatabase();
+    await pgm.setupDatabase();
+    realValidateSignatureFunctions = await pgm._queryOne('res', SQL`
+      select
+        proname,
+        array_agg(pg_get_functiondef(pp.oid)) as res
+      from pg_proc pp
+      inner join pg_namespace pn on (pp.pronamespace = pn.oid)
+      inner join pg_language pl on (pp.prolang = pl.oid)
+      where
+        proname = 'ecdsa_verify'
+      group by proname
+    `);
+
+    // Mock out ecdsa_verify so we don't need to worry about having valid
+    // signatures during these tests (it will be put back in for the signature
+    // tests when we need to do that).
+    realValidateSignatureFunctions.forEach(async (func) => {
+      let sig = func.toLowerCase().match(/ecdsa_verify\(.*\)/)[0];
+      await pgm._query(`
+        create or replace function ${sig} returns boolean
+        language sql as $$ select true $$;
+      `);
+    });
   });
 
   beforeEach(async () => {
@@ -60,8 +83,8 @@ describe('PGMachinomy', () => {
 
   let testChannel = {
     chain_id: 1,
-    contract_id: 'contract_id-xxxxxxxxxxxxxxxxxxxxxxxxxxxx',
-    channel_id: mkchanid('testChan'),
+    contract_id: mkcontractid('c'),
+    channel_id: mkchanid('a'),
   };
 
   let stateUpdateSequenceNum = null;
@@ -70,13 +93,13 @@ describe('PGMachinomy', () => {
 
     amount: 1.23,
     sequence_num: stateUpdateSequenceNum++,
-    signature: 'signature-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx',
+    signature: mksig(),
   }, x || {});
 
   let expectedDbState = update(testChannel, {
     'amount': 1.23,
     'sequence_num': 1,
-    'signature': 'signature-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx',
+    'signature': mksig(),
   });
 
   it('Check state update: simple', async () => {
@@ -106,7 +129,7 @@ describe('PGMachinomy', () => {
   });
 
   it('Insert state update: invalid: bad data', async () => {
-    let res = await pgm.insertStateUpdate(testStateUpdate({ 'contract_id': 'invalid' }));
+    let res = await pgm.insertStateUpdate(testStateUpdate({ 'contract_id': '0000' }));
 
     assert.containSubset(res, {
       'error': true,
@@ -406,6 +429,28 @@ describe('PGMachinomy', () => {
 
     });
 
+  });
+
+  describe('mcy_pack_* functions', async () => {
+    let packTests = [
+      [0, 4, '00000000'],
+      [1, 4, '00000001'],
+      [0xaabb, 4, '0000aabb'],
+      [0xaabbccdd, 4, 'aabbccdd'],
+      [0xaa000000, 4, 'aa000000'],
+      [0xaa00, 3, '00aa00'],
+    ];
+    packTests.forEach(test => {
+      let [input, num, expected] = test;
+      ['bigint', 'numeric'].forEach(type => {
+        it(`pack_${type}_big_endian_bytes: ${input.toString(16)} => ${expected}`, async () => {
+          let res = await pgm._queryOne('res', `
+            select mcy_pack_${type}_big_endian_bytes(${num}, '${input}'::${type}) as res
+          `);
+          assert.equal(res, expected);
+        });
+      });
+    });
   });
 
 

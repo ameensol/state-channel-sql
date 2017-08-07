@@ -58,4 +58,4 @@ Performance Improvements
   do an index-only scan:
 
     create index state_updates_chain_contract_chan_seq_amt_idx
-    on state_updates (chain_id, contract_id, channel_id, sequence_num, amount);
+    on state_updates (chain_id, contract_id, channel_id, amount, nonce);

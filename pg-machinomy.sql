@@ -2,6 +2,8 @@
 -- Setup extensions
 --
 create extension if not exists hstore;
+create extension if not exists pgcrypto;
+create extension if not exists pguecc;
 
 --
 -- Data types
@@ -481,7 +483,7 @@ create function mcy_channel_apply_event(
     out new_channel mcy_channel, out is_invalid boolean, out is_invalid_reason text
 )
 returns record
-language plpgsql as $pgsql$
+language plpgsql immutable as $pgsql$
 declare
     event_type text := event.event_type;
     fields jsonb := event.fields;
@@ -532,7 +534,7 @@ $pgsql$;
 
 create function mcy_assert_channel_state(event_type text, channel mcy_channel, a text, b text default null)
 returns text
-language plpgsql as $pgsql$
+language plpgsql immutable as $pgsql$
 declare
     chan_state text := coalesce(channel.state::text, 'NULL');
 begin
@@ -575,14 +577,37 @@ $pgsql$;
 
 create function mcy_state_update_is_signature_valid(state_update jsonb)
 returns boolean
-language sql as $$
-    -- TODO: Actaully figure out how to check this signature
-    select true::boolean as signature_valid
-$$;
+language plpgsql immutable as $pgsql$
+declare
+    is_valid boolean;
+    amount mcy_eth;
+    to_hash bytea;
+begin
+    amount := (state_update->>'amount');
+
+    to_hash := (
+        '\x' ||
+        mcy_pack_bigint_big_endian_bytes(4, (state_update->>'chain_id')::int) ||
+        lpad((state_update->>'contract_id'), 40, '0') ||
+        lpad((state_update->>'channel_id'), 64, '0') ||
+
+        mcy_pack_bigint_big_endian_bytes(4, coalesce((state_update->>'sequence_num')::int, 0)) ||
+        mcy_pack_numeric_big_endian_bytes(32, amount * 1e18)
+    )::bytea;
+
+    return ecdsa_verify(
+        state_update->>'sender',
+        to_hash,
+        (state_update->>'r') || (state_update->>'s'),
+        'sha256'::text,
+        'secp256k1'::text
+    );
+end
+$pgsql$;
 
 create function mcy_state_update_row_to_json(state_update state_updates)
 returns jsonb
-language sql as $$
+language sql immutable as $$
     select row_to_json(state_update)::jsonb;
 $$;
 
@@ -702,13 +727,14 @@ begin
         sup.chain_id = chain_id_ and
         sup.contract_id = contract_id_ and
         sup.channel_id = channel_id_
-    order by sequence_num desc
+    order by amount desc
     limit 1
     into latest_state;
 
     return latest_state;
 end
 $pgsql$;
+
 
 create function mcy_null_row_to_json(r anyelement)
 returns jsonb
@@ -718,5 +744,77 @@ begin
         return 'null'::jsonb;
     end if;
     return row_to_json(r);
+end
+$pgsql$;
+
+
+-- Packs ``val`` into a hex-encoded string, left padded to ``num_bytes`` bytes::
+--
+--     =# select mcy_pack_numeric_big_endian_bytes(4, 0xAABB);
+--     '0000AABB'
+--
+-- Will raise an error if ``val`` is non-integral, or if the result would
+-- be too large to fit into ``num_bytes`` bytes.
+create function mcy_pack_numeric_big_endian_bytes(num_bytes integer, val numeric)
+returns text
+language plpgsql immutable as $pgsql$
+declare
+    result text := '';
+    orig_val numeric := val;
+    byte_val integer;
+    byte_hex varchar(2);
+begin
+    if val != trunc(val) then
+        raise exception 'value must not have decimal places: %', orig_val;
+    end if;
+
+    while val > 0 loop
+        byte_val := (val % 256)::int;
+        byte_hex := to_hex(byte_val);
+        val := trunc(val / 256);
+        if byte_val < 16 then
+            byte_hex := '0' || byte_hex;
+        end if;
+        result := byte_hex || result;
+    end loop;
+
+    if (length(result) / 2) > num_bytes then
+        raise exception 'value too large for % bytes: %', num_bytes, orig_val;
+    end if;
+
+    result := repeat('00', num_bytes - (length(result) / 2)) || result;
+    return result;
+end
+$pgsql$;
+
+create function mcy_pack_bigint_big_endian_bytes(num_bytes integer, val bigint)
+returns text
+language plpgsql immutable as $pgsql$
+declare
+    result text := '';
+    orig_val bigint := val;
+    byte_val bigint;
+    byte_hex varchar(2);
+begin
+    if val != trunc(val) then
+        raise exception 'value must not have decimal places: %', orig_val;
+    end if;
+
+    while val > 0 loop
+        byte_val := (val % 256)::int;
+        byte_hex := to_hex(byte_val);
+        val := trunc(val / 256);
+        if byte_val < 16 then
+            byte_hex := '0' || byte_hex;
+        end if;
+        result := byte_hex || result;
+    end loop;
+
+    if (length(result) / 2) > num_bytes then
+        raise exception 'value too large for % bytes: %', num_bytes, orig_val;
+    end if;
+
+    result := repeat('00', num_bytes - (length(result) / 2)) || result;
+    return result;
 end
 $pgsql$;

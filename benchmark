@@ -78,15 +78,15 @@ async function runBenchmarkThread(reportCb, threadNum) {
   let now = () => new Date() / 1000;
 
   let zpad = (prefix, totalLength) => {
-    prefix = `${prefix}-${threadNum}-`;
+    prefix = `${prefix}f${threadNum}f`;
     return prefix + '0'.repeat(totalLength - prefix.length);
   };
 
   let mkEvents = chanId => {
     let baseChan = {
       chain_id: 1,
-      contract_id: zpad(`contract-${process.pid}`, 40),
-      channel_id: zpad(`chan-${chanId}`, 64),
+      contract_id: zpad(`c0f${process.pid}`, 40),
+      channel_id: zpad(`c4f${chanId}`, 64),
     };
 
     let ts = now();
