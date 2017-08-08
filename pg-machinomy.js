@@ -319,6 +319,34 @@ class PGMachinomy {
 
 }
 
+async function monkeypatchSignatureVerification(pgm) {
+  // Grab the original functions
+  let realVerifyFuncs = await pgm._queryOne('res', SQL`
+    select
+      proname,
+      array_agg(pg_get_functiondef(pp.oid)) as res
+    from pg_proc pp
+    inner join pg_namespace pn on (pp.pronamespace = pn.oid)
+    inner join pg_language pl on (pp.prolang = pl.oid)
+    where
+      proname = 'ecdsa_verify'
+    group by proname
+  `);
+
+  // Replace each original function with a stub that always reutrns true
+  await Promise.all(realVerifyFuncs.map(async (func) => {
+    let sig = func.toLowerCase().match(/ecdsa_verify\(.*\)/)[0];
+    await pgm._query(`
+      create or replace function ${sig} returns boolean
+      language sql as $$ select true $$;
+    `);
+  }));
+
+  return realVerifyFuncs;
+}
+
+
 module.exports = {
   PGMachinomy: PGMachinomy,
+  monkeypatchSignatureVerification: monkeypatchSignatureVerification,
 };

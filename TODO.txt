@@ -1,3 +1,13 @@
+SOON
+====
+
+- Check for negative state values
+    - And generally copy the rest of the verification code
+
+
+CHECK THESE AT SOME POINT
+=========================
+
 - Check that pg function signatures are sensible (ex, should immutable, strict, etc be added?)
 
 - Replace the placeholder implementations of:
@@ -54,6 +64,7 @@ Questions:
 
 Performance Improvements
 ========================
+
 - Try adding an index on state_updates which includes the price so PG 9.6 can
   do an index-only scan:
 

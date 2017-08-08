@@ -28,8 +28,6 @@ let mksig = mkrpad(130);
 describe('PGMachinomy', () => {
   let pgm;
 
-  let realValidateSignatureFunctions;
-
   before(async () => {
     // Ignore any errors here, they'll be checked when we create the DB
     let cxn = new PgAsync(update(TEST_DB, { database: 'postgres' }))
@@ -38,28 +36,7 @@ describe('PGMachinomy', () => {
 
     pgm = new m.PGMachinomy(TEST_DB);
     await pgm.setupDatabase();
-    realValidateSignatureFunctions = await pgm._queryOne('res', SQL`
-      select
-        proname,
-        array_agg(pg_get_functiondef(pp.oid)) as res
-      from pg_proc pp
-      inner join pg_namespace pn on (pp.pronamespace = pn.oid)
-      inner join pg_language pl on (pp.prolang = pl.oid)
-      where
-        proname = 'ecdsa_verify'
-      group by proname
-    `);
-
-    // Mock out ecdsa_verify so we don't need to worry about having valid
-    // signatures during these tests (it will be put back in for the signature
-    // tests when we need to do that).
-    realValidateSignatureFunctions.forEach(async (func) => {
-      let sig = func.toLowerCase().match(/ecdsa_verify\(.*\)/)[0];
-      await pgm._query(`
-        create or replace function ${sig} returns boolean
-        language sql as $$ select true $$;
-      `);
-    });
+    await m.monkeypatchSignatureVerification(pgm);
   });
 
   beforeEach(async () => {

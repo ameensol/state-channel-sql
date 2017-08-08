@@ -70,6 +70,7 @@ async function initDB() {
 
   let pgm = new m.PGMachinomy(TEST_DB);
   await pgm.setupDatabase();
+  await m.monkeypatchSignatureVerification(pgm);
   pgm.close();
 }
 
@@ -138,7 +139,7 @@ async function runBenchmarkThread(reportCb, threadNum) {
   // - What's the perf when intents get involved?
 
   let NUM_LOOPS = 100;
-  let NUM_UPDATES = 10000;
+  let NUM_UPDATES = 1000;
 
   let pgm = new m.PGMachinomy(TEST_DB);
   for (let loopNum = 0; loopNum < NUM_LOOPS; loopNum += 1) {
@@ -160,7 +161,13 @@ async function runBenchmarkThread(reportCb, threadNum) {
       });
 
       let startTime = process.hrtime();
-      await pgm.insertStateUpdate(stateUpdate);
+      let res = await pgm.insertStateUpdate(stateUpdate);
+      if (res.error) {
+        console.error('insertStateUpdate returned an error!');
+        console.error('stateUpdate:\n', stateUpdate);
+        console.error('response:\n', res);
+        throw new Error('insertStateUpdate returned an error (see console)');
+      }
       let duration = process.hrtime(startTime);
       updateTimes.push(hrtime2ms(duration));
     }
