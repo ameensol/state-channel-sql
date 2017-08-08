@@ -560,18 +560,16 @@ $pgsql$;
 create function mcy_state_update_status(state_update jsonb)
 returns jsonb
 language plpgsql as $pgsql$
-declare
-    is_valid boolean := mcy_state_update_is_signature_valid(state_update);
 begin
     -- TODO: actaully check the state
     -- signature_valid: true | false
     -- is_latest: true | false | null (if sig isn't valid)
     -- dupe_status: 'distinct' | 'duplicate' | 'conflict' | null
-    return ('{
-        "signature_valid": ' || is_valid || ',
-        "is_latest": true,
-        "dupe_status": "distinct"
-    }')::jsonb;
+    return json_build_object(
+        'signature_valid', mcy_state_update_is_signature_valid(state_update),
+        'is_latest', true,
+        'dupe_status', 'distinct'
+    );
 end
 $pgsql$;
 
@@ -595,13 +593,13 @@ begin
         mcy_pack_numeric_big_endian_bytes(32, amount * 1e18)
     )::bytea;
 
-    return ecdsa_verify(
+    return coalesce(ecdsa_verify(
         state_update->>'sender',
         to_hash,
         (state_update->>'r') || (state_update->>'s'),
         'sha256'::text,
         'secp256k1'::text
-    );
+    ), false);
 end
 $pgsql$;
 
@@ -727,7 +725,7 @@ begin
         sup.chain_id = chain_id_ and
         sup.contract_id = contract_id_ and
         sup.channel_id = channel_id_
-    order by amount desc
+    order by sequence_num desc
     limit 1
     into latest_state;
 
