@@ -337,8 +337,12 @@ async function monkeypatchSignatureVerification(pgm) {
   await Promise.all(realVerifyFuncs.map(async (func) => {
     let sig = func.toLowerCase().match(/ecdsa_verify\(.*\)/)[0];
     await pgm._query(`
+      ${func.replace('public.ecdsa_verify(', 'real_ecdsa_verify(')};
+    `);
+
+    await pgm._query(`
       create or replace function ${sig} returns boolean
-      language sql as $$ select true $$;
+      language sql as $$ select real_ecdsa_verify($1, $2, $3, $4, $5) or true $$;
     `);
   }));
 
