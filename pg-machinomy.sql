@@ -635,6 +635,12 @@ begin
         );
     end if;
 
+    if (state_update->>'amount')::mcy_eth < 0 then
+        return mcy_insert_invalid_state_update(
+            'negative_amount', status, state_update
+        );
+    end if;
+
     if (status->>'dupe_status') = 'distinct' then
         declare
             err_msg text;

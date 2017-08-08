@@ -88,34 +88,45 @@ describe('PGMachinomy', () => {
     });
   });
 
-  it('Insert state update: valid', async () => {
-    let res = await pgm.insertStateUpdate(testStateUpdate());
+  describe('Inserting state updates', async () => {
+    it('Valid', async () => {
+      let res = await pgm.insertStateUpdate(testStateUpdate());
 
-    assert.containSubset(res, {
-      'created': true,
-      'status': {
-        'signature_valid': true,
+      assert.containSubset(res, {
+        'created': true,
+        'status': {
+          'signature_valid': true,
+          'is_latest': true,
+          'dupe_status': 'distinct',
+        },
         'is_latest': true,
-        'dupe_status': 'distinct',
-      },
-      'is_latest': true,
-      'latest_state': expectedDbState,
-      'channel_payment': 1.23,
-      'channel_remaining_balance': null,
+        'latest_state': expectedDbState,
+        'channel_payment': 1.23,
+        'channel_remaining_balance': null,
+      });
     });
-  });
 
-  it('Insert state update: invalid: bad data', async () => {
-    let res = await pgm.insertStateUpdate(testStateUpdate({ 'contract_id': '0000' }));
+    it('Bad data', async () => {
+      let res = await pgm.insertStateUpdate(testStateUpdate({ 'contract_id': '0000' }));
 
-    assert.containSubset(res, {
-      'error': true,
-      'reason': 'invalid_state: value for domain mcy_eth_address violates check constraint "mcy_eth_address_check"',
-      'status': {
-        'signature_valid': true,
-        'is_latest': true,
-        'dupe_status': 'distinct',
-      },
+      assert.containSubset(res, {
+        'error': true,
+        'reason': 'invalid_state: value for domain mcy_eth_address violates check constraint "mcy_eth_address_check"',
+        'status': {
+          'signature_valid': true,
+          'is_latest': true,
+          'dupe_status': 'distinct',
+        },
+      });
+    });
+
+    it('Negative amount', async () => {
+      let res = await pgm.insertStateUpdate(testStateUpdate({
+        'amount': -1,
+      }));
+      assert.containSubset(res, {
+        'error': true,
+      });
     });
   });
 
