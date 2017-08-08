@@ -1,8 +1,29 @@
 SOON
 ====
 
-- Check for negative state values
-    - And generally copy the rest of the verification code
+- Figure out what to do with state updates that put the balance over the
+  channel's balance
+
+- Check the sender on state updates
+
+- In general, state updates can be invalid in two ways:
+    - "They could never be valid": negative value, etc
+    - "They could eventually be valid": amount is greater than current channel
+      value, we don't know the intended sender so we can't verify the sig, etc.
+  And we need to figure out how to deal with this...
+
+  Rule:
+
+    The result of a state update insert reflects the state of the block chain
+    *right now*. An insert will fail if it's invalid with respect to the
+    present state, and will succeed in the event it's valid with respect to the
+    present state.
+
+    In the event of a reorg, we walk backwarfds through state updates,
+    validating or invalidating them based on the present chain state.
+
+    This will work because after a reorg, I BELIEVE (to be proven), that state
+    update N - 1 will always be valid if state update N is valid.
 
 
 CHECK THESE AT SOME POINT
@@ -37,7 +58,7 @@ CHECK THESE AT SOME POINT
 
 - License, name, etc in package.json
 
-- Ongoing maintanence and update workflow
+- Ongoing maintenance and update workflow
 
 - mark public vs private functions in the SQL interface
 

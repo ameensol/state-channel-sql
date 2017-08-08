@@ -560,15 +560,36 @@ $pgsql$;
 create function mcy_state_update_status(state_update jsonb)
 returns jsonb
 language plpgsql as $pgsql$
+declare
+    last_status state_updates;
+    amount mcy_eth := (state_update->>'amount');
+    is_latest boolean;
 begin
-    -- TODO: actaully check the state
     -- signature_valid: true | false
     -- is_latest: true | false | null (if sig isn't valid)
     -- dupe_status: 'distinct' | 'duplicate' | 'conflict' | null
+    -- added_amount: eth | null (the amount of eth this update adds to the
+    --   channel; null if this update isn't the latest)
+
+    last_status := mcy_get_latest_state_update(state_update);
+
+    is_latest := coalesce(amount >= last_status.amount, true);
+
     return json_build_object(
         'signature_valid', mcy_state_update_is_signature_valid(state_update),
-        'is_latest', true,
-        'dupe_status', 'distinct'
+        'is_latest', is_latest,
+        'added_amount', (
+            case when is_latest
+            then amount - coalesce(last_status.amount, 0)
+            else null
+            end
+        ),
+        'dupe_status', (
+            case when coalesce(last_status.amount = amount, false)
+            then 'dupe'
+            else 'distinct'
+            end
+        )
     );
 end
 $pgsql$;
@@ -618,6 +639,8 @@ declare
     new_row state_updates;
     latest_state state_updates;
     channel mcy_channel;
+
+    amount mcy_eth;
 begin
     -- TODO: make sure we're doing the appropriate locking here so that
     -- state updates are serialized.
@@ -635,34 +658,26 @@ begin
         );
     end if;
 
-    if (state_update->>'amount')::mcy_eth < 0 then
+    amount := (state_update->>'amount');
+    if amount < 0 then
         return mcy_insert_invalid_state_update(
             'negative_amount', status, state_update
         );
     end if;
 
     if (status->>'dupe_status') = 'distinct' then
-        declare
-            err_msg text;
-        begin
-            insert into state_updates (
-                chain_id, contract_id, channel_id, ts, sequence_num, amount, signature
-            )
-            select
-                (state_update->>'chain_id')::int as chain_id,
-                (state_update->>'contract_id')::mcy_eth_address as contract_id,
-                (state_update->>'channel_id')::mcy_sha3_hash as channel_id,
-                to_timestamp((state_update->>'ts')::float) as ts,
-                (state_update->>'sequence_num')::int as sequence_num,
-                (state_update->>'amount')::mcy_eth as amount,
-                (state_update->>'signature')::mcy_secp256k1_sig as signature
-            returning * into new_row;
-        exception when others then
-            get stacked diagnostics err_msg = MESSAGE_TEXT;
-            return mcy_insert_invalid_state_update(
-                'invalid_state: ' || err_msg, status, state_update
-            );
-        end;
+        insert into state_updates (
+            chain_id, contract_id, channel_id, ts, sequence_num, amount, signature
+        )
+        select
+            (state_update->>'chain_id')::int as chain_id,
+            (state_update->>'contract_id')::mcy_eth_address as contract_id,
+            (state_update->>'channel_id')::mcy_sha3_hash as channel_id,
+            to_timestamp((state_update->>'ts')::float) as ts,
+            (state_update->>'sequence_num')::int as sequence_num,
+            (state_update->>'amount')::mcy_eth as amount,
+            (state_update->>'signature')::mcy_secp256k1_sig as signature
+        returning * into new_row;
     end if;
 
     latest_state := (
@@ -680,6 +695,7 @@ begin
         'status', status,
         'is_latest', status->'is_latest',
         'latest_state', (mcy_state_update_row_to_json(latest_state)),
+        'added_amount', status->'added_amount',
         'channel_payment', latest_state.amount,
         'channel_remaining_balance', channel.value - latest_state.amount
     );

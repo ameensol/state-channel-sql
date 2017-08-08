@@ -62,12 +62,15 @@ class PGMachinomy {
    * returns:
    *
    *   StateUpdateStatus = {
-   *     signature_valid: true | false
-   *     is_latest: true | false | null (if sig isn't valid)
+   *     signature_valid: true | false,
+   *     is_latest: true | false,
    *     dupe_status:
    *       'distinct'  | // Not a duplicate
    *       'duplicate' | // An exact duplicate state exists
    *       'conflict'  | // A state with the same serial number but different exists
+   *     // The amount of eth this update adds to the channel. Will be ``null``
+   *     // if this update isn't the latest.
+   *     added_amount: eth | null,
    *   }
    */
   getStateUpdateStatus(stateUpdate) {
@@ -94,6 +97,9 @@ class PGMachinomy {
    *     channel_payment: eth_amount (identical to latest_state.amount)
    *     // If a channel exists and has a value, `channel.value - latest_state.amount`.
    *     channel_remaining_balance: null | eth_amount
+   *     // The amount of eth this update adds to the channel. See
+   *     // StateUpdateStatus.added_amount.
+   *     added_amount: eth | null
    *   }
    *
    * Where:

@@ -101,31 +101,37 @@ describe('PGMachinomy', () => {
         },
         'is_latest': true,
         'latest_state': expectedDbState,
+        'added_amount': 1.23,
         'channel_payment': 1.23,
         'channel_remaining_balance': null,
       });
     });
 
-    it('Bad data', async () => {
-      let res = await pgm.insertStateUpdate(testStateUpdate({ 'contract_id': '0000' }));
-
-      assert.containSubset(res, {
-        'error': true,
-        'reason': 'invalid_state: value for domain mcy_eth_address violates check constraint "mcy_eth_address_check"',
-        'status': {
-          'signature_valid': true,
-          'is_latest': true,
-          'dupe_status': 'distinct',
-        },
-      });
-    });
-
     it('Negative amount', async () => {
       let res = await pgm.insertStateUpdate(testStateUpdate({
+        'added_amount': null,
         'amount': -1,
       }));
       assert.containSubset(res, {
         'error': true,
+      });
+    });
+
+    it('Non-latest update', async () => {
+      let res;
+      res = await pgm.insertStateUpdate(testStateUpdate({ 'amount': 2, sequence_num: 2 }));
+      assert.containSubset(res, {
+        'added_amount': 2,
+        'status': {
+          'is_latest': true,
+        },
+      });
+      res = await pgm.insertStateUpdate(testStateUpdate({ 'amount': 1, sequence_num: 1 }));
+      assert.containSubset(res, {
+        'added_amount': null,
+        'status': {
+          'is_latest': false,
+        },
       });
     });
   });
@@ -135,7 +141,7 @@ describe('PGMachinomy', () => {
 
     assert.containSubset(await pgm.getLatestState(testChannel), expectedDbState);
 
-    await pgm.insertStateUpdate(testStateUpdate({ amount: 2.34, sequence_num: 2 }));
+    await pgm.insertStateUpdate(testStateUpdate({ amount: 2.34 }));
     assert.containSubset(await pgm.getLatestState(testChannel), update(expectedDbState, {
       'amount': 2.34,
       'sequence_num': 2,
@@ -226,6 +232,7 @@ describe('PGMachinomy', () => {
 
     res = await pgm.insertStateUpdate(testStateUpdate({ amount: 3 }));
     assert.containSubset(res, {
+      'added_amount': 1.5,
       'channel_payment': 3,
       'channel_remaining_balance': 2,
     });
