@@ -33,13 +33,12 @@ create table state_updates (
     channel_id mcy_sha3_hash not null,
     ts timestamp not null,
 
-    sequence_num int not null,
     amount mcy_eth not null,
     signature mcy_secp256k1_sig not null
 );
 
 create unique index state_updates_chain_contract_chan_seq_unique_idx
-on state_updates (chain_id, contract_id, channel_id, sequence_num);
+on state_updates (chain_id, contract_id, channel_id, amount);
 
 
 create table invalid_state_updates (
@@ -501,26 +500,26 @@ begin
         is_invalid_reason := mcy_assert_channel_state(event_type, channel, NULL);
         channel.state = 'CS_OPEN';
         channel.opened_on = event.ts;
-        channel.sender = (fields->>'sender')::mcy_eth_address;
-        channel.receiver = (fields->>'receiver')::mcy_eth_address;
-        channel.settlement_period = (fields->>'settlement_period')::int;
-        channel.until = to_timestamp((fields->>'until')::float);
-        channel.value = 0;
+        channel.sender = mcy_not_null(fields, 'sender')::mcy_eth_address;
+        channel.receiver = mcy_not_null(fields, 'receiver')::mcy_eth_address;
+        channel.settlement_period = mcy_not_null(fields, 'settlement_period')::int;
+        channel.until = to_timestamp(mcy_not_null(fields, 'until')::float);
+        channel.value = mcy_not_null(fields, 'value')::mcy_eth;
     elsif event_type = 'DidDeposit' then
         is_invalid_reason := mcy_assert_channel_state(event_type, channel, 'CS_OPEN');
-        channel.value = coalesce(channel.value, 0) + (fields->>'value')::mcy_eth;
+        channel.value = coalesce(channel.value, 0) + mcy_not_null(fields, 'value')::mcy_eth;
     elsif event_type = 'DidStartSettle' then
         is_invalid_reason := mcy_assert_channel_state(event_type, channel, 'CS_OPEN');
         channel.state = 'CS_SETTLING';
         channel.settlement_started_on = event.ts;
         channel.until = event.ts + (channel.settlement_period * (interval '1 second'));
-        channel.payment = (fields->>'payment')::mcy_eth;
+        channel.payment = mcy_not_null(fields, 'payment')::mcy_eth;
     elsif event_type = 'DidSettle' then
         is_invalid_reason := mcy_assert_channel_state(event_type, channel, 'CS_OPEN', 'CS_SETTLING');
         channel.state = 'CS_SETTLED';
         channel.settlement_finalized_on = event.ts;
-        channel.payment = (fields->>'payment')::mcy_eth;
-        channel.odd_value = (fields->>'odd_value')::mcy_eth;
+        channel.payment = mcy_not_null(fields, 'payment')::mcy_eth;
+        channel.odd_value = mcy_not_null(fields, 'odd_value')::mcy_eth;
     else
         is_invalid_reason := 'invalid event type: ' || event_type;
     end if;
@@ -562,7 +561,7 @@ returns jsonb
 language plpgsql as $pgsql$
 declare
     last_status state_updates;
-    amount mcy_eth := (state_update->>'amount');
+    amount mcy_eth := mcy_not_null(state_update, 'amount');
     is_latest boolean;
 begin
     -- signature_valid: true | false
@@ -602,7 +601,7 @@ declare
     amount mcy_eth;
     to_hash bytea;
 begin
-    amount := (state_update->>'amount');
+    amount := mcy_not_null(state_update, 'amount');
 
     to_hash := (
         '\x' ||
@@ -610,7 +609,6 @@ begin
         lpad((state_update->>'contract_id'), 40, '0') ||
         lpad((state_update->>'channel_id'), 64, '0') ||
 
-        mcy_pack_bigint_big_endian_bytes(4, coalesce((state_update->>'sequence_num')::int, 0)) ||
         mcy_pack_numeric_big_endian_bytes(32, amount * 1e18)
     )::bytea;
 
@@ -667,14 +665,13 @@ begin
 
     if (status->>'dupe_status') = 'distinct' then
         insert into state_updates (
-            chain_id, contract_id, channel_id, ts, sequence_num, amount, signature
+            chain_id, contract_id, channel_id, ts, amount, signature
         )
         select
             (state_update->>'chain_id')::int as chain_id,
             (state_update->>'contract_id')::mcy_eth_address as contract_id,
             (state_update->>'channel_id')::mcy_sha3_hash as channel_id,
             to_timestamp((state_update->>'ts')::float) as ts,
-            (state_update->>'sequence_num')::int as sequence_num,
             (state_update->>'amount')::mcy_eth as amount,
             (state_update->>'signature')::mcy_secp256k1_sig as signature
         returning * into new_row;
@@ -721,33 +718,20 @@ $pgsql$;
 
 create function mcy_get_latest_state_update(chan jsonb)
 returns state_updates
-called on null input
-language plpgsql as $pgsql$
+language plpgsql stable called on null input as $pgsql$
 declare
-    chain_id_ int := (chan->>'chain_id')::int;
-    contract_id_ mcy_eth_address := (chan->>'contract_id')::mcy_eth_address;
-    channel_id_ mcy_sha3_hash := (chan->>'channel_id')::mcy_sha3_hash;
+    chain_id_ int := mcy_not_null(chan, 'chain_id');
+    contract_id_ mcy_eth_address := mcy_not_null(chan, 'contract_id');
+    channel_id_ mcy_sha3_hash := mcy_not_null(chan, 'channel_id');
     latest_state state_updates;
 begin
-    if chain_id_ is null then
-        raise exception 'chain_id must not be null' using errcode = 'null_value_not_allowed';
-    end if;
-
-    if contract_id_ is null then
-        raise exception 'contract_id must not be null' using errcode = 'null_value_not_allowed';
-    end if;
-
-    if channel_id_ is null then
-        raise exception 'channel_id must not be null' using errcode = 'null_value_not_allowed';
-    end if;
-
     select sup.*
     from state_updates as sup
     where
         sup.chain_id = chain_id_ and
         sup.contract_id = contract_id_ and
         sup.channel_id = channel_id_
-    order by sequence_num desc
+    order by amount desc
     limit 1
     into latest_state;
 
@@ -836,5 +820,18 @@ begin
 
     result := repeat('00', num_bytes - (length(result) / 2)) || result;
     return result;
+end
+$pgsql$;
+
+create function mcy_not_null(obj jsonb, field text)
+returns text
+language plpgsql immutable called on null input as $pgsql$
+declare
+    res text := (obj->>field);
+begin
+    if res is null then
+        raise exception '% must not be null', field using errcode = 'null_value_not_allowed';
+    end if;
+    return res;
 end
 $pgsql$;

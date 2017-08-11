@@ -40,7 +40,6 @@ describe('PGMachinomy', () => {
   });
 
   beforeEach(async () => {
-    stateUpdateSequenceNum = 1;
     await pgm._query(`
       truncate table state_updates cascade;
       truncate table invalid_state_updates cascade;
@@ -64,18 +63,15 @@ describe('PGMachinomy', () => {
     channel_id: mkchanid('a'),
   };
 
-  let stateUpdateSequenceNum = null;
   let testStateUpdate = x => update(testChannel, {
     ts: 1234,
 
     amount: 1.23,
-    sequence_num: stateUpdateSequenceNum++,
     signature: mksig(),
   }, x || {});
 
   let expectedDbState = update(testChannel, {
     'amount': 1.23,
-    'sequence_num': 1,
     'signature': mksig(),
   });
 
@@ -119,14 +115,14 @@ describe('PGMachinomy', () => {
 
     it('Non-latest update', async () => {
       let res;
-      res = await pgm.insertStateUpdate(testStateUpdate({ 'amount': 2, sequence_num: 2 }));
+      res = await pgm.insertStateUpdate(testStateUpdate({ 'amount': 2 }));
       assert.containSubset(res, {
         'added_amount': 2,
         'status': {
           'is_latest': true,
         },
       });
-      res = await pgm.insertStateUpdate(testStateUpdate({ 'amount': 1, sequence_num: 1 }));
+      res = await pgm.insertStateUpdate(testStateUpdate({ 'amount': 1 }));
       assert.containSubset(res, {
         'added_amount': null,
         'status': {
@@ -144,7 +140,6 @@ describe('PGMachinomy', () => {
     await pgm.insertStateUpdate(testStateUpdate({ amount: 2.34 }));
     assert.containSubset(await pgm.getLatestState(testChannel), update(expectedDbState, {
       'amount': 2.34,
-      'sequence_num': 2,
     }));
 
   });
@@ -170,6 +165,7 @@ describe('PGMachinomy', () => {
     sender: 'sender-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx',
     receiver: 'receiver-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx',
     settlement_period: 17,
+    value: 0,
     until: 7890,
   });
 
@@ -183,6 +179,7 @@ describe('PGMachinomy', () => {
 
   let didSettleEvent = mkChanEvent('DidSettle', {
     payment: 2.0,
+    odd_value: 1.25,
   });
 
   it('Get channel: empty', async () => {
