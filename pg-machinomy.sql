@@ -65,81 +65,95 @@ create type mcy_channel_event_type as enum (
 );
 
 
+/*
+The Solidity events fired by by Machinomy's Broker.sol.
+
+Insert events with ``mcy_insert_channel_event(...)``.
+
+Used to build up a channel's state (see ``mcy_get_channel``).
+*/
 create table channel_events (
     id bigserial primary key,
     chain_id int not null,
     contract_id mcy_eth_address not null,
     channel_id mcy_sha3_hash not null,
 
-    -- For blockchain events, the "ts" will be the block's timestamp. For
-    -- "intent" events, the "ts" will be the server timestamp at the time the
-    -- event was received.
+    -- The block's timestamp, number, and hash.
     ts timestamp not null,
-
-    -- For "intent" events the block_number is the latest known block number at
-    -- the time the intent was issued. This is used to enforce serialization
-    -- between "intent" events and block-based events.
     block_number int not null,
-
-    -- For "intent" events, the block hash will be null until it has been
-    -- correlated with a blockchain event, at which point it will be set to the
-    -- block's hash.
     block_hash mcy_sha3_hash not null,
 
-    -- Will always be true for intent events.
+    -- Whether this block is valid and should be considered in the channel's
+    -- state. Always ``true`` initially, but set to ``false`` by
+    -- ``mcy_set_recent_blocks`` if this block is orphaned by a reorg.
     block_is_valid boolean not null,
 
-    -- For "intent" events, the "sender" is the address we expect the
-    -- transaction to be sent from.
+    -- The event's sender
     sender mcy_eth_address not null,
 
+    -- The event's type ('DidCreateChannel', etc) and event-specific fields
+    -- as defined by the broker contract ('value', 'payment', etc).
     event_type mcy_channel_event_type not null,
-
     fields jsonb not null
 );
 
 
 create index channel_events_ordering_idx
-on channel_events (chain_id, contract_id, channel_id, block_number, block_hash, ts);
+on channel_events (chain_id, contract_id, channel_id, block_number, block_hash);
 
 
+/*
+"Intent" events have a similar structure to ``channel_events``, but are used
+by the application server to register that it "intends" to see a particular
+event at some point in the future.
+
+For example, when a channel is settled, the application may insert an intent
+event immediately so that the fact that a channel has been closed will be
+reflected in subsequent calls to ``mcy_get_channel(...)``, even though the
+"real" event hasn't yet been received from the blockchain.
+
+Each time a "real" ``channel_event`` arrives the corresponding
+``channel_intents``'s ``block_hash`` will be updated to
+reflect the hash of the "real" event's block. This is done by the
+``mcy_update_channel_intents_trigger()`` trigger.
+
+Insert channel intents with ``mcy_insert_channel_intent(...)``.
+*/
 create table channel_intents (
     id bigserial primary key,
     chain_id int not null,
     contract_id mcy_eth_address not null,
     channel_id mcy_sha3_hash not null,
 
-    -- For blockchain events, the "ts" will be the block's timestamp. For
-    -- "intent" events, the "ts" will be the server timestamp at the time the
-    -- event was received.
+    -- The server's timestamp
     ts timestamp not null,
 
-    -- For "intent" events the block_number is the latest known block number at
-    -- the time the intent was issued. This is used to enforce serialization
-    -- between "intent" events and block-based events.
+    -- The latest known block number at the time the intent was issued. This is
+    -- used to enforce serialization between "intent" events and block-based
+    -- events.
     block_number int not null,
 
-    -- For "intent" events, the block hash will be null until it has been
-    -- correlated with a blockchain event, at which point it will be set to the
-    -- block's hash.
+    -- The block hash will be null until it has been correlated with a
+    -- blockchain event, at which point it will be set to that block's hash.
     block_hash mcy_sha3_hash,
 
-    -- Will always be true for intent events.
+    -- Always true (to simplify compatibility with ``channel_events``).
     block_is_valid boolean null,
 
-    -- For "intent" events, the "sender" is the address we expect the
-    -- transaction to be sent from.
+    -- The address we expect the transaction to be sent from.
     sender mcy_eth_address not null,
 
+    -- Same as ``channel_events``.
     event_type mcy_channel_event_type not null,
-
     fields jsonb not null
 );
 
 
 create index channel_intents_ordering_idx
-on channel_events (chain_id, contract_id, channel_id, block_number, block_hash, ts);
+on channel_intents (chain_id, contract_id, channel_id, block_number, block_hash, ts);
 
+-- Internal. Finds the (possibly null) hash of a ``channel_events``'s block
+-- which corresponds to a ``channel_intent``.
 create function mcy_get_intent_block_hash(intent channel_intents)
 returns mcy_sha3_hash
 language sql as $$
@@ -157,6 +171,8 @@ language sql as $$
     order by id desc limit 1;
 $$;
 
+-- Internal. Trigger which updates ``channel_intents.block_hash`` as
+-- ``channel_events`` are inserted, updated, and removed.
 create function mcy_update_channel_intents_trigger()
 returns trigger
 language plpgsql as $pgsql$
@@ -197,6 +213,13 @@ on channel_events
 for each row execute procedure mcy_update_channel_intents_trigger();
 
 
+/*
+Inserts a channel event (see ``channel_events``) and returns the channel's
+status (see ``mcy_get_channel_status()``).
+
+See documentation on ``PGMachinomy.insertChannelEvent(...)`` for the fields in
+``event``.
+*/
 create function mcy_insert_channel_event(event jsonb)
 returns jsonb
 language plpgsql as $pgsql$
@@ -232,6 +255,13 @@ end
 $pgsql$;
 
 
+/*
+Inserts a channel intent (see ``channel_intents``) and returns the channel's
+status (see ``mcy_get_channel_status()``).
+
+See documentation on ``PGMachinomy.insertChannelIntent(...)`` for the fields in
+``event``.
+*/
 create function mcy_insert_channel_intent(intent jsonb)
 returns jsonb
 language plpgsql as $pgsql$
@@ -271,11 +301,24 @@ end
 $pgsql$;
 
 
+/*
+Handle reorgs by updating the database so that it's in sync with the current
+blockchain state. ``chain_id`` is the block chain being updated,
+``first_block_num`` is the block number of the first block in ``block_hashes``,
+which is a list of block hashes.
 
--- Updates the database so that it's in sync with the current blockchain state.
--- ``chain_id`` is the block chain being updated, ``first_block_num`` is the
--- block number of the first block in ``block_hashes``, which is a list of
--- block hashes.
+See documentation on ``PGMachinomy.setRecentBlocks()`` for more.
+
+Returns a JSON object::
+
+    {
+        "updated_event_count": int, // the number of events that were updated
+        // the new states of all channels that were changed (see
+        // ``mcy_get_channel_status``)
+        "updated_channels": [...],  
+    }
+*/
+
 create function mcy_set_recent_blocks(chain_id_ int, first_block_num int, block_hashes text[])
 returns jsonb
 language plpgsql as $pgsql$
@@ -324,7 +367,7 @@ begin
     return json_build_object(
         'updated_event_count', updated_event_count,
         'updated_channels', array((
-            select mcy_get_channel_status(chan, false)
+            select mcy_get_channel_status(chan, true)
             from unnest(updated_contracts_list) as x(chan)
         ))
     );
@@ -342,6 +385,13 @@ create type mcy_channel_state as enum (
     'CS_SETTLED'   -- Channel has been settled
 );
 
+/*
+The state of a Machinomy payment channel. Generated by ``mcy_get_channel()``.
+
+A type instead of a table because channel states are purely aggregate, and for
+the moment they are rebuilt from channel events on demand (if this ever proves
+to be too slow, it will be straight forward to introduce a caching layer).
+*/
 create type mcy_channel as (
     chain_id int,
     contract_id mcy_eth_address,
@@ -368,10 +418,12 @@ create type mcy_channel as (
 );
 
 
--- Returns all of the events that pertain to a channel in their canonical order
--- (ie, oldest first), excluding events from blocks known to be orphaned. If
--- ``include_intent`` is set, "intent" invents will be included (not just
--- events from the block chain).
+/*
+Returns all of the events that pertain to a channel in their canonical order
+(ie, oldest first), excluding events from blocks known to be orphaned. If
+``include_intent`` is set, "intent" invents will be included (not just "real"
+events from the block chain).
+*/
 create function mcy_get_channel_events(chan jsonb, include_intent boolean)
 returns setof channel_events
 language sql as $$
@@ -409,6 +461,19 @@ create type mcy_get_channel_result as (
     is_invalid_reason text
 );
 
+/*
+Gets the state of a channel (see ``mcy_channel``).
+
+The ``chan`` should be a ``jsonb`` object with ``chain_id``, ``contract_id``,
+and ``channel_id`` fields.
+
+Safe to use externally, but ``mcy_get_channel_status`` is more likely to be
+useful to external callers.
+
+At the moment channels are re-built from their event on demand, but in the
+future a cache table may be introduced, and that table would be used by this
+function.
+*/
 create function mcy_get_channel(chan jsonb, include_intent boolean)
 returns mcy_get_channel_result
 language plpgsql as $pgsql$
@@ -443,6 +508,14 @@ end
 $pgsql$;
 
 
+/*
+Gets a channel's status, which includes the ``mcy_channel`` and information
+about the current balance, last event, etc.
+
+Likely the most useful function to external callers.
+
+See code or ``PGMachinomy.getChannelStatus()`` for complete documentation.
+*/
 create function mcy_get_channel_status(chan jsonb, include_intent boolean)
 returns jsonb
 language plpgsql as $pgsql$
@@ -477,6 +550,47 @@ end
 $pgsql$;
 
 
+/*
+Internal.
+
+Update a (possibly null) ``channel mcy_channel`` in response to an
+``event channel_events``.
+
+Consider this the "reduction" step in a map/reduce.
+
+Will return with ``is_invalid = true`` and ``is_invalid_reason`` set to a
+developer-friendly explanation of the error if the event would yield an
+obviously invalid channel (ex, if two ``DidCreateChannel`` events are received
+for the same channel. When ``is_invalid = true`` the original (ie, non-updated)
+channel will be returned.
+
+For example:
+
+    =# chan := mcy_channel_apply_event(null, row(
+    .#     type='DidCreateChannel',
+    .#     fields='{"sender": "abc...", "receiver": "123...", "value": 42, ...},
+    .#     ...
+    .# ));
+    =# print chan;
+    row(
+        new_channel=mcy_channel(state='CS_OPEN', sender='abc...', receiver='123...', value=42, ...)),
+        is_invalid=false,
+        is_invalid_reason=null,
+    );
+    =# print mcy_channel_apply_event(chan, row(type='DidCreateChannel', ...));
+    row(
+        new_channel=mcy_channel(state='CS_OPEN', ...),
+        is_invalid=true,
+        is_invalid_reason='invalid channel state for event DidCreateChannel: got CS_OPEN but should be NULL.',
+    )
+    =# print mcy_channel_apply_event(chan, row(type='DidDeposit', fields='{"value": 25}', ...));
+    row(
+        new_channel=mcy_channel(state='CS_OPEN', value=67, ...)),
+        is_invalid=false,
+        is_invalid_reason=null,
+    );
+*/
+
 create function mcy_channel_apply_event(
     in channel mcy_channel, in event channel_events,
     out new_channel mcy_channel, out is_invalid boolean, out is_invalid_reason text
@@ -494,8 +608,6 @@ begin
         channel.last_event_id = event.id;
     end if;
 
-    -- TODO: check for invalid updates
-
     if event_type = 'DidCreateChannel' then
         is_invalid_reason := mcy_assert_channel_state(event_type, channel, NULL);
         channel.state = 'CS_OPEN';
@@ -507,7 +619,7 @@ begin
         channel.value = mcy_not_null(fields, 'value')::mcy_eth;
     elsif event_type = 'DidDeposit' then
         is_invalid_reason := mcy_assert_channel_state(event_type, channel, 'CS_OPEN');
-        channel.value = coalesce(channel.value, 0) + mcy_not_null(fields, 'value')::mcy_eth;
+        channel.value = channel.value + mcy_not_null(fields, 'value')::mcy_eth;
     elsif event_type = 'DidStartSettle' then
         is_invalid_reason := mcy_assert_channel_state(event_type, channel, 'CS_OPEN');
         channel.state = 'CS_SETTLING';
@@ -530,7 +642,8 @@ begin
 end
 $pgsql$;
 
-
+-- Internal. Used by mcy_channel_apply_event to ensure a channel's state is
+-- sensible before being updated.
 create function mcy_assert_channel_state(event_type text, channel mcy_channel, a text, b text default null)
 returns text
 language plpgsql immutable as $pgsql$
@@ -556,7 +669,13 @@ $pgsql$;
 -- Functions
 --
 
-create function mcy_state_update_status(state_update jsonb)
+/*
+Checks the status - signature validity, whether it's a duplicate, and whether
+it's the latest - of a state update without inserting it into the database.
+
+See ``PGMachinomy.getStateUpdateStatus()``.
+*/
+create function mcy_get_state_update_status(state_update jsonb)
 returns jsonb
 language plpgsql as $pgsql$
 declare
@@ -593,6 +712,7 @@ begin
 end
 $pgsql$;
 
+-- Internal. Checks the signature on a state update.
 create function mcy_state_update_is_signature_valid(state_update jsonb)
 returns boolean
 language plpgsql immutable as $pgsql$
@@ -622,12 +742,26 @@ begin
 end
 $pgsql$;
 
+
+/*
+Converts a ``state_update`` to a ``jsonb`` object.
+
+Public, but probably not especially useful (except internally).
+*/
 create function mcy_state_update_row_to_json(state_update state_updates)
 returns jsonb
 language sql immutable as $$
     select row_to_json(state_update)::jsonb;
 $$;
 
+
+/*
+Inserts a state update into the database, returning whether or not the update
+was valid (and inserting it into the ``invalid_state_updates`` table if not)
+and the new balance of the payment channel.
+
+See ``PGMachinomy.insertStateUpdate()`` for full details.
+*/
 create function mcy_insert_state_update(state_update jsonb, include_intent bool default true)
 returns jsonb
 language plpgsql as $pgsql$
@@ -642,7 +776,7 @@ declare
 begin
     -- TODO: make sure we're doing the appropriate locking here so that
     -- state updates are serialized.
-    status := mcy_state_update_status(state_update);
+    status := mcy_get_state_update_status(state_update);
 
     if not (status->>'signature_valid')::boolean then
         return mcy_insert_invalid_state_update(
@@ -700,6 +834,8 @@ end
 $pgsql$;
 
 
+-- Internal. Inserts an invalid state update into the ``invalid_state_updates``
+-- table and returns an error.
 create function mcy_insert_invalid_state_update(reason text, status jsonb, blob jsonb)
 returns jsonb
 language plpgsql as $pgsql$
@@ -716,6 +852,9 @@ end
 $pgsql$;
 
 
+/*
+Gets the latest state update for a particular channel.
+*/
 create function mcy_get_latest_state_update(chan jsonb)
 returns state_updates
 language plpgsql stable called on null input as $pgsql$
@@ -739,7 +878,8 @@ begin
 end
 $pgsql$;
 
-
+-- Internal. Returns a ``null::jsonb`` if the input row is null, otherwise
+-- the input row converted to json.
 create function mcy_null_row_to_json(r anyelement)
 returns jsonb
 language plpgsql immutable as $pgsql$
@@ -752,6 +892,7 @@ end
 $pgsql$;
 
 
+-- Internal.
 -- Packs ``val`` into a hex-encoded string, left padded to ``num_bytes`` bytes::
 --
 --     =# select mcy_pack_numeric_big_endian_bytes(4, 0xAABB);
@@ -791,6 +932,10 @@ begin
 end
 $pgsql$;
 
+-- Internal.
+-- See documentation on ``mcy_pack_numeric_big_endian_bytes``.
+-- Duplicated function for efficiency (``bigint`` operations are faster than
+-- ``numeric`` operations).
 create function mcy_pack_bigint_big_endian_bytes(num_bytes integer, val bigint)
 returns text
 language plpgsql immutable as $pgsql$
@@ -823,6 +968,8 @@ begin
 end
 $pgsql$;
 
+-- Internal. Extracts ``field`` from ``jsonb obj`` and throws an exception
+-- if the result (or any of the input) is null.
 create function mcy_not_null(obj jsonb, field text)
 returns text
 language plpgsql immutable called on null input as $pgsql$

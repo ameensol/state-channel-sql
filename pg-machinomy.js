@@ -75,7 +75,7 @@ class PGMachinomy {
    */
   getStateUpdateStatus(stateUpdate) {
     return this._queryOne('res', SQL`
-      SELECT mcy_state_update_status(${stateUpdate}::jsonb) AS res
+      SELECT mcy_get_state_update_status(${stateUpdate}::jsonb) AS res
     `);
   }
 
@@ -111,7 +111,6 @@ class PGMachinomy {
    *     chain_id: int,
    *     ts: Date,
    *
-   *     sequence_num: int,
    *     amount: eth_amount,
    *     signature: secp256k1_sig,
    *  }
