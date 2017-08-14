@@ -68,9 +68,9 @@ class PGMachinomy {
    *       'distinct'  | // Not a duplicate
    *       'duplicate' | // An exact duplicate state exists
    *       'conflict'  | // A state with the same serial number but different exists
-   *     // The amount of eth this update adds to the channel. Will be ``null``
+   *     // The amount of wei this update adds to the channel. Will be ``null``
    *     // if this update isn't the latest.
-   *     added_amount: eth | null,
+   *     added_amount: wei_amount | null,
    *   }
    */
   getStateUpdateStatus(stateUpdate) {
@@ -94,24 +94,23 @@ class PGMachinomy {
    *     status: StateUpdateStatus
    *     is_latest: true | false
    *     latest_state: StateUpdate of the latest state in the channel
-   *     channel_payment: eth_amount (identical to latest_state.amount)
+   *     channel_payment: wei_amount (identical to latest_state.amount)
    *     // If a channel exists and has a value, `channel.value - latest_state.amount`.
-   *     channel_remaining_balance: null | eth_amount
-   *     // The amount of eth this update adds to the channel. See
+   *     channel_remaining_balance: null | wei_amount
+   *     // The amount of wei this update adds to the channel. See
    *     // StateUpdateStatus.added_amount.
-   *     added_amount: eth | null
+   *     added_amount: wei_amount | null
    *   }
    *
    * Where:
    *
    *   StateUpdate = {
-   *     id: int,
    *     chain_id: int,
    *     contract_id: eth_address,
-   *     chain_id: int,
+   *     channel_id: sha3_hash,
    *     ts: Date,
    *
-   *     amount: eth_amount,
+   *     amount: wei_amount,
    *     signature: secp256k1_sig,
    *  }
    *
@@ -182,8 +181,8 @@ class PGMachinomy {
    *     // `current_payment` and `current_remaining_balance` are
    *     // shortcuts for `current_payment = latest_state.amount` and
    *     // `channel.value - current_payment`.
-   *     current_payment: null | eth_amount,
-   *     current_remaining_balance: null | eth_amount,
+   *     current_payment: null | wei_amount,
+   *     current_remaining_balance: null | wei_amount,
    *
    *     is_invalid: boolean,
    *     is_invalid_reason: null | developer-friendly reason
@@ -198,12 +197,12 @@ class PGMachinomy {
    *
    *     sender: null | eth_address,
    *     receiver: null | eth_address,
-   *     value: null | eth_amount,
+   *     value: null | wei_amount,
    *     settlement_period: null | int,
    *     until: null | timestamp,
    *
-   *     payment: null | eth_amount,
-   *     odd_value: null | eth_amount,
+   *     payment: null | wei_amount,
+   *     odd_value: null | wei_amount,
    *
    *     // If any of the events related to this channel are intent events,
    *     // state_is_intent will be true, meaning the state represented here isn't

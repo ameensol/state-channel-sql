@@ -15,11 +15,31 @@ check ( length(value) = 40 );
 create domain mcy_sha3_hash as varchar(64)
 check ( length(value) = 64 );
 
--- hopefully we'll never need to store more than 1e(1000-18) either...
-create domain mcy_eth as numeric(1000, 18);
+-- hopefully we'll never need to store more than 1e1000 wei...
+create domain mcy_wei as numeric(1000);
+
+-- use this to cast mcy_wei values to JSON
+create domain mcy_wei_to_js as text;
+
+create function mcy_wei_from_js(obj jsonb, field text)
+returns mcy_wei
+language plpgsql immutable as $pgsql$
+declare
+    val jsonb := (obj->field);
+    val_type text := jsonb_typeof(val);
+begin
+    if val_type = 'string' then
+        return (obj->>field)::mcy_wei;
+    end if;
+
+    raise exception 'wei values must be text (but % is %)', val, val_type;
+end
+$pgsql$;
+
 
 create domain mcy_secp256k1_sig as varchar(130)
 check ( length(value) = 130 );
+
 
 
 --
@@ -33,12 +53,38 @@ create table state_updates (
     channel_id mcy_sha3_hash not null,
     ts timestamp not null,
 
-    amount mcy_eth not null,
+    amount mcy_wei not null,
     signature mcy_secp256k1_sig not null
 );
 
 create unique index state_updates_chain_contract_chan_seq_unique_idx
 on state_updates (chain_id, contract_id, channel_id, amount);
+
+
+/*
+Converts a ``state_update`` to a ``jsonb`` object.
+
+Public, but probably not especially useful (except internally).
+*/
+create function mcy_state_update_row_to_json(su state_updates)
+returns jsonb
+language plpgsql immutable called on null input as $pgsql$
+begin
+    if su is null then
+        return 'null'::jsonb;
+    end if;
+
+    return json_build_object(
+        'id', su.id,
+        'chain_id', su.chain_id,
+        'contract_id', su.contract_id,
+        'channel_id', su.channel_id,
+        'ts', su.ts,
+        'amount', su.amount::mcy_wei_to_js,
+        'signature', su.signature
+    );
+end
+$pgsql$;
 
 
 create table invalid_state_updates (
@@ -147,6 +193,23 @@ create table channel_intents (
     event_type mcy_channel_event_type not null,
     fields jsonb not null
 );
+
+/*
+Converts a ``channel_events`` or ``channel_intents`` to a ``jsonb`` object.
+
+Public, but probably not especially useful (except internally).
+*/
+create function mcy_channel_event_to_json(e anyelement)
+returns jsonb
+language plpgsql immutable called on null input as $pgsql$
+begin
+    if e is null then
+        return 'null'::jsonb;
+    end if;
+
+    return row_to_json(e);
+end
+$pgsql$;
 
 
 create index channel_intents_ordering_idx
@@ -402,12 +465,12 @@ create type mcy_channel as (
 
     sender mcy_eth_address,
     receiver mcy_eth_address,
-    value mcy_eth,
+    value mcy_wei,
     settlement_period int,
     until timestamp,
 
-    payment mcy_eth,
-    odd_value mcy_eth,
+    payment mcy_wei,
+    odd_value mcy_wei,
 
     state mcy_channel_state,
     state_is_intent boolean,
@@ -417,6 +480,46 @@ create type mcy_channel as (
     settlement_finalized_on timestamp
 );
 
+
+/*
+Converts an ``mcy_channel`` to a ``jsonb`` object.
+
+Public, but probably not especially useful (except internally).
+*/
+create function mcy_channel_row_to_json(c mcy_channel)
+returns jsonb
+language plpgsql immutable called on null input as $pgsql$
+begin
+    if c is null then
+        return 'null'::jsonb;
+    end if;
+
+    return json_build_object(
+        'chain_id', c.chain_id,
+        'contract_id', c.contract_id,
+        'channel_id', c.channel_id,
+
+        'last_state_id', c.last_state_id,
+        'last_event_id', c.last_event_id,
+
+        'sender', c.sender,
+        'receiver', c.receiver,
+        'value', c.value::mcy_wei_to_js,
+        'settlement_period', c.settlement_period,
+        'until', c.until,
+
+        'payment', c.payment::mcy_wei_to_js,
+        'odd_value', c.odd_value::mcy_wei_to_js,
+
+        'state', c.state,
+        'state_is_intent', c.state_is_intent,
+
+        'opened_on', c.opened_on,
+        'settlement_started_on', c.settlement_started_on,
+        'settlement_finalized_on', c.settlement_finalized_on
+    );
+end
+$pgsql$;
 
 /*
 Returns all of the events that pertain to a channel in their canonical order
@@ -532,15 +635,15 @@ begin
     latest_state := mcy_get_latest_state_update(chan);
 
     return json_build_object(
-        'channel', mcy_null_row_to_json(channel),
+        'channel', mcy_channel_row_to_json(channel),
         'latest_state', mcy_state_update_row_to_json(latest_state),
 
-        'current_payment', latest_state.amount,
-        'current_remaining_balance', channel.value - latest_state.amount,
+        'current_payment', latest_state.amount::mcy_wei_to_js,
+        'current_remaining_balance', (channel.value - latest_state.amount)::mcy_wei_to_js,
 
-        'latest_event', mcy_null_row_to_json(cr.latest_event),
-        'latest_intent_event', mcy_null_row_to_json(cr.latest_intent_event),
-        'latest_chain_event', mcy_null_row_to_json(cr.latest_chain_event),
+        'latest_event', mcy_channel_event_to_json(cr.latest_event),
+        'latest_intent_event', mcy_channel_event_to_json(cr.latest_intent_event),
+        'latest_chain_event', mcy_channel_event_to_json(cr.latest_chain_event),
 
         'is_invalid', cr.is_invalid,
         'is_invalid_reason', cr.is_invalid_reason
@@ -616,22 +719,22 @@ begin
         channel.receiver = mcy_not_null(fields, 'receiver')::mcy_eth_address;
         channel.settlement_period = mcy_not_null(fields, 'settlement_period')::int;
         channel.until = to_timestamp(mcy_not_null(fields, 'until')::float);
-        channel.value = mcy_not_null(fields, 'value')::mcy_eth;
+        channel.value = mcy_wei_from_js(fields, 'value');
     elsif event_type = 'DidDeposit' then
         is_invalid_reason := mcy_assert_channel_state(event_type, channel, 'CS_OPEN');
-        channel.value = channel.value + mcy_not_null(fields, 'value')::mcy_eth;
+        channel.value = channel.value + mcy_wei_from_js(fields, 'value');
     elsif event_type = 'DidStartSettle' then
         is_invalid_reason := mcy_assert_channel_state(event_type, channel, 'CS_OPEN');
         channel.state = 'CS_SETTLING';
         channel.settlement_started_on = event.ts;
         channel.until = event.ts + (channel.settlement_period * (interval '1 second'));
-        channel.payment = mcy_not_null(fields, 'payment')::mcy_eth;
+        channel.payment = mcy_not_null(fields, 'payment')::mcy_wei;
     elsif event_type = 'DidSettle' then
         is_invalid_reason := mcy_assert_channel_state(event_type, channel, 'CS_OPEN', 'CS_SETTLING');
         channel.state = 'CS_SETTLED';
         channel.settlement_finalized_on = event.ts;
-        channel.payment = mcy_not_null(fields, 'payment')::mcy_eth;
-        channel.odd_value = mcy_not_null(fields, 'odd_value')::mcy_eth;
+        channel.payment = mcy_not_null(fields, 'payment')::mcy_wei;
+        channel.odd_value = mcy_not_null(fields, 'odd_value')::mcy_wei;
     else
         is_invalid_reason := 'invalid event type: ' || event_type;
     end if;
@@ -680,7 +783,7 @@ returns jsonb
 language plpgsql as $pgsql$
 declare
     last_status state_updates;
-    amount mcy_eth := mcy_not_null(state_update, 'amount');
+    amount mcy_wei := mcy_wei_from_js(state_update, 'amount');
     is_latest boolean;
 begin
     -- signature_valid: true | false
@@ -701,7 +804,7 @@ begin
             then amount - coalesce(last_status.amount, 0)
             else null
             end
-        ),
+        )::mcy_wei_to_js,
         'dupe_status', (
             case when coalesce(last_status.amount = amount, false)
             then 'dupe'
@@ -718,11 +821,9 @@ returns boolean
 language plpgsql immutable as $pgsql$
 declare
     is_valid boolean;
-    amount mcy_eth;
+    amount mcy_wei := mcy_wei_from_js(state_update, 'amount');
     to_hash bytea;
 begin
-    amount := mcy_not_null(state_update, 'amount');
-
     to_hash := (
         '\x' ||
         mcy_pack_bigint_big_endian_bytes(4, (state_update->>'chain_id')::int) ||
@@ -744,18 +845,6 @@ $pgsql$;
 
 
 /*
-Converts a ``state_update`` to a ``jsonb`` object.
-
-Public, but probably not especially useful (except internally).
-*/
-create function mcy_state_update_row_to_json(state_update state_updates)
-returns jsonb
-language sql immutable as $$
-    select row_to_json(state_update)::jsonb;
-$$;
-
-
-/*
 Inserts a state update into the database, returning whether or not the update
 was valid (and inserting it into the ``invalid_state_updates`` table if not)
 and the new balance of the payment channel.
@@ -772,7 +861,7 @@ declare
     latest_state state_updates;
     channel mcy_channel;
 
-    amount mcy_eth;
+    amount mcy_wei;
 begin
     -- TODO: make sure we're doing the appropriate locking here so that
     -- state updates are serialized.
@@ -790,7 +879,7 @@ begin
         );
     end if;
 
-    amount := (state_update->>'amount');
+    amount := mcy_wei_from_js(state_update, 'amount');
     if amount < 0 then
         return mcy_insert_invalid_state_update(
             'negative_amount', status, state_update
@@ -806,7 +895,7 @@ begin
             (state_update->>'contract_id')::mcy_eth_address as contract_id,
             (state_update->>'channel_id')::mcy_sha3_hash as channel_id,
             to_timestamp((state_update->>'ts')::float) as ts,
-            (state_update->>'amount')::mcy_eth as amount,
+            amount,
             (state_update->>'signature')::mcy_secp256k1_sig as signature
         returning * into new_row;
     end if;
@@ -827,8 +916,8 @@ begin
         'is_latest', status->'is_latest',
         'latest_state', (mcy_state_update_row_to_json(latest_state)),
         'added_amount', status->'added_amount',
-        'channel_payment', latest_state.amount,
-        'channel_remaining_balance', channel.value - latest_state.amount
+        'channel_payment', (latest_state.amount)::mcy_wei_to_js,
+        'channel_remaining_balance', (channel.value - latest_state.amount)::mcy_wei_to_js
     );
 end
 $pgsql$;
@@ -875,19 +964,6 @@ begin
     into latest_state;
 
     return latest_state;
-end
-$pgsql$;
-
--- Internal. Returns a ``null::jsonb`` if the input row is null, otherwise
--- the input row converted to json.
-create function mcy_null_row_to_json(r anyelement)
-returns jsonb
-language plpgsql immutable as $pgsql$
-begin
-    if r is null then
-        return 'null'::jsonb;
-    end if;
-    return row_to_json(r);
 end
 $pgsql$;
 

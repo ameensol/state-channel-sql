@@ -1,6 +1,6 @@
 var chai = require('chai');
-var chaiSubset = require('chai-subset');
-chai.use(chaiSubset);
+chai.use(require('chai-subset'));
+chai.use(require('chai-as-promised'));
 
 let _pga = require('pg-async');
 let [PgAsync, SQL] = [_pga['default'], _pga.SQL];
@@ -66,12 +66,12 @@ describe('PGMachinomy', () => {
   let testStateUpdate = x => update(testChannel, {
     ts: 1234,
 
-    amount: 1.23,
+    amount: '123',
     signature: mksig(),
   }, x || {});
 
   let expectedDbState = update(testChannel, {
-    'amount': 1.23,
+    'amount': '123',
     'signature': mksig(),
   });
 
@@ -97,8 +97,8 @@ describe('PGMachinomy', () => {
         },
         'is_latest': true,
         'latest_state': expectedDbState,
-        'added_amount': 1.23,
-        'channel_payment': 1.23,
+        'added_amount': '123',
+        'channel_payment': '123',
         'channel_remaining_balance': null,
       });
     });
@@ -106,23 +106,37 @@ describe('PGMachinomy', () => {
     it('Negative amount', async () => {
       let res = await pgm.insertStateUpdate(testStateUpdate({
         'added_amount': null,
-        'amount': -1,
+        'amount': '-1',
       }));
       assert.containSubset(res, {
         'error': true,
       });
     });
 
+    it('Missing amount', async () => {
+      await assert.isRejected(pgm.insertStateUpdate(testStateUpdate({
+        'added_amount': null,
+        'amount': null,
+      })), /must be text/);
+    });
+
+    it('Numeric amount', async () => {
+      await assert.isRejected(pgm.insertStateUpdate(testStateUpdate({
+        'added_amount': null,
+        'amount': 123,
+      })), /must be text/);
+    });
+
     it('Non-latest update', async () => {
       let res;
-      res = await pgm.insertStateUpdate(testStateUpdate({ 'amount': 2 }));
+      res = await pgm.insertStateUpdate(testStateUpdate({ 'amount': '2' }));
       assert.containSubset(res, {
-        'added_amount': 2,
+        'added_amount': '2',
         'status': {
           'is_latest': true,
         },
       });
-      res = await pgm.insertStateUpdate(testStateUpdate({ 'amount': 1 }));
+      res = await pgm.insertStateUpdate(testStateUpdate({ 'amount': '1' }));
       assert.containSubset(res, {
         'added_amount': null,
         'status': {
@@ -137,9 +151,9 @@ describe('PGMachinomy', () => {
 
     assert.containSubset(await pgm.getLatestState(testChannel), expectedDbState);
 
-    await pgm.insertStateUpdate(testStateUpdate({ amount: 2.34 }));
+    await pgm.insertStateUpdate(testStateUpdate({ amount: '234' }));
     assert.containSubset(await pgm.getLatestState(testChannel), update(expectedDbState, {
-      'amount': 2.34,
+      'amount': '234',
     }));
 
   });
@@ -165,21 +179,21 @@ describe('PGMachinomy', () => {
     sender: 'sender-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx',
     receiver: 'receiver-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx',
     settlement_period: 17,
-    value: 0,
+    value: '0',
     until: 7890,
   });
 
   let didDepositChannelEvent = mkChanEvent('DidDeposit', {
-    value: 3.45,
+    value: '345',
   });
 
   let didStartSettleEvent = mkChanEvent('DidStartSettle', {
-    payment: 1.23,
+    payment: '123',
   });
 
   let didSettleEvent = mkChanEvent('DidSettle', {
-    payment: 2.0,
-    odd_value: 1.25,
+    payment: '200',
+    odd_value: '125',
   });
 
   it('Get channel: empty', async () => {
@@ -196,14 +210,14 @@ describe('PGMachinomy', () => {
     let res;
 
     await pgm.insertChannelEvent(didCreateChannelEvent);
-    await pgm.insertChannelEvent(update(didDepositChannelEvent, { fields: { value: 5 }}));
-    await pgm.insertStateUpdate(testStateUpdate({ amount: 1.5 }));
+    await pgm.insertChannelEvent(update(didDepositChannelEvent, { fields: { value: '500' }}));
+    await pgm.insertStateUpdate(testStateUpdate({ amount: '150' }));
 
     res = await pgm.getChannelStatus(testChannel)
     assert.containSubset(res, {
       channel: {
         state: 'CS_OPEN',
-        value: 5,
+        value: '500',
       },
 
       latest_chain_event: {
@@ -217,21 +231,21 @@ describe('PGMachinomy', () => {
       latest_intent_event: null,
 
       latest_state: {
-        amount: 1.5,
+        amount: '150',
       },
 
       is_invalid: false,
       is_invalid_reason: null,
 
-      current_payment: 1.5,
-      current_remaining_balance: 3.5,
+      current_payment: '150',
+      current_remaining_balance: '350',
     });
 
-    res = await pgm.insertStateUpdate(testStateUpdate({ amount: 3 }));
+    res = await pgm.insertStateUpdate(testStateUpdate({ amount: '300' }));
     assert.containSubset(res, {
-      'added_amount': 1.5,
-      'channel_payment': 3,
-      'channel_remaining_balance': 2,
+      'added_amount': '150',
+      'channel_payment': '300',
+      'channel_remaining_balance': '200',
     });
 
     await pgm.insertChannelIntent(update(didStartSettleEvent));
@@ -240,7 +254,7 @@ describe('PGMachinomy', () => {
     assert.containSubset(res, {
       channel: {
         state: 'CS_SETTLING',
-        value: 5,
+        value: '500',
       },
 
       latest_chain_event: {
@@ -256,14 +270,14 @@ describe('PGMachinomy', () => {
       },
 
       latest_state: {
-        amount: 3.0,
+        amount: '300',
       },
 
       is_invalid: false,
       is_invalid_reason: null,
 
-      current_payment: 3.0,
-      current_remaining_balance: 2.0,
+      current_payment: '300',
+      current_remaining_balance: '200',
     });
 
   });
@@ -323,17 +337,17 @@ describe('PGMachinomy', () => {
     let res;
 
     await insertEvent(didCreateChannelEvent, 1, 'a');
-    await insertEvent(didDepositChannelEvent, 2, 'b', { value: 1 });
-    await insertEvent(didDepositChannelEvent, 3, 'c', { value: 2 });
+    await insertEvent(didDepositChannelEvent, 2, 'b', { value: '100' });
+    await insertEvent(didDepositChannelEvent, 3, 'c', { value: '200' });
 
     res = await pgm.getChannelStatus(testChannel);
-    assert.containSubset(res, { channel: { value: 3 }});
+    assert.containSubset(res, { channel: { value: '300' }});
 
     res = await pgm.setRecentBlocks(testChannel.chain_id, 1, ['a', 'b'].map(mkhash));
     assert.containSubset(res, {
       'updated_event_count': 1,
       'updated_channels': [
-        { channel: { value: 1 }},
+        { channel: { value: '100' }},
       ],
     });
 
@@ -341,7 +355,7 @@ describe('PGMachinomy', () => {
     assert.containSubset(res, {
       'updated_event_count': 2,
       'updated_channels': [
-        { channel: { value: 2 }},
+        { channel: { value: '200' }},
       ],
     });
 
