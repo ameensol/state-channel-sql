@@ -1,10 +1,7 @@
 SOON
 ====
 
-- Figure out what to do with state updates that put the balance over the
-  channel's balance
-
-- Check the sender on state updates
+- Test with real, actual example values
 
 - In general, state updates can be invalid in two ways:
     - "They could never be valid": negative value, etc
@@ -29,24 +26,6 @@ SOON
 CHECK THESE AT SOME POINT
 =========================
 
-- Check that pg function signatures are sensible (ex, should immutable, strict, etc be added?)
-
-- Replace the placeholder implementations of:
-    - mcy_state_update_is_signature_valid
-    - mcy_check_state_update
-
-- Should there be a 'channel_id' composite datatype?
-
-    create type mcy_channel_id as (
-        chain_id integer,
-        contract_id mcy_eth_address,
-        channel_hash mcy_sha3_hash
-    )
-
-  - After a bunch of experimentation, it seems like no: that wouldn't make
-    things much better, and leads to more confusing code and translation
-    between SQL <-> JS.
-
 - Somehow translate between the values coming from Web3 with the values we're
   expecting.
     - Will values be in wei or eth? (I think wei, but need to be sure)
@@ -59,28 +38,6 @@ CHECK THESE AT SOME POINT
 - License, name, etc in package.json
 
 - Ongoing maintenance and update workflow
-
-- mark public vs private functions in the SQL interface
-
-- benchmark performance of mcy_get_channel, figure out how much caching we
-  need.
-
-Questions:
-
-- Is it possible to uniquely identify events so we can make sure they aren't
-  duplicated?
-  - Would this be `logIndex`?
-
-- The only way a channel can be put into an invalid state is getting events
-  out of the expected order. These checks should be expanded to include, ex,
-  the senders + receivers.
-
-- Create trigger to make sure that events can't be updated after they've
-  been inserted.
-
-- Is it possible for a reorg to make the chain shorter (ie, is the assumption
-  that the intent event's block_number will always be <= the event which
-  contains the actual event valid?)
 
 
 Performance Improvements

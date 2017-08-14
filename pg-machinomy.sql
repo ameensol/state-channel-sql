@@ -54,6 +54,7 @@ create table state_updates (
     ts timestamp not null,
 
     amount mcy_wei not null,
+    sender mcy_eth_address,
     signature mcy_secp256k1_sig not null
 );
 
@@ -786,7 +787,7 @@ declare
     amount mcy_wei := mcy_wei_from_js(state_update, 'amount');
     is_latest boolean;
 begin
-    -- signature_valid: true | false
+    -- signature_valid: true | false // Does NOT check that the sender is correct
     -- is_latest: true | false | null (if sig isn't valid)
     -- dupe_status: 'distinct' | 'duplicate' | 'conflict' | null
     -- added_amount: eth | null (the amount of eth this update adds to the
@@ -886,9 +887,22 @@ begin
         );
     end if;
 
+    channel := (mcy_get_channel(state_update, include_intent)).channel;
+    if channel.sender is null or (state_update->>'sender') <> channel.sender then
+        return mcy_insert_invalid_state_update(
+            'incorrect_sender', status, state_update
+        );
+    end if;
+
     if (status->>'dupe_status') = 'distinct' then
+        if amount > channel.value then
+            return mcy_insert_invalid_state_update(
+                'amount_exceeds_channel_value', status, state_update
+            );
+        end if;
+
         insert into state_updates (
-            chain_id, contract_id, channel_id, ts, amount, signature
+            chain_id, contract_id, channel_id, ts, amount, sender, signature
         )
         select
             (state_update->>'chain_id')::int as chain_id,
@@ -896,6 +910,7 @@ begin
             (state_update->>'channel_id')::mcy_sha3_hash as channel_id,
             to_timestamp((state_update->>'ts')::float) as ts,
             amount,
+            (state_update->>'sender')::mcy_eth_address as sender,
             (state_update->>'signature')::mcy_secp256k1_sig as signature
         returning * into new_row;
     end if;
@@ -906,8 +921,6 @@ begin
         else mcy_get_latest_state_update(state_update)
         end
     );
-
-    channel := (mcy_get_channel(state_update, include_intent)).channel;
 
     return json_build_object(
         'id', new_row.id,

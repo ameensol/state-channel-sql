@@ -62,15 +62,15 @@ class PGMachinomy {
    * returns:
    *
    *   StateUpdateStatus = {
-   *     signature_valid: true | false,
-   *     is_latest: true | false,
+   *     signature_valid: true | false // Does NOT check that the sender is correct
+   *     is_latest: true | false
    *     dupe_status:
    *       'distinct'  | // Not a duplicate
    *       'duplicate' | // An exact duplicate state exists
    *       'conflict'  | // A state with the same serial number but different exists
    *     // The amount of wei this update adds to the channel. Will be ``null``
    *     // if this update isn't the latest.
-   *     added_amount: wei_amount | null,
+   *     added_amount: wei_amount | null
    *   }
    */
   getStateUpdateStatus(stateUpdate) {
@@ -111,6 +111,7 @@ class PGMachinomy {
    *     ts: Date,
    *
    *     amount: wei_amount,
+   *     sender: eth_address,
    *     signature: secp256k1_sig,
    *  }
    *
@@ -120,7 +121,12 @@ class PGMachinomy {
    *   {
    *     error: true,
    *     status: StateUpdateStatus
-   *     reason: 'signature_invalid' | 'conflict' | 'invalid_state: <developer friendly reason>'
+   *     reason: |
+   *       'signature_invalid' | // The signature is invalid
+   *       'conflict' | // The update's value is smaller than a previous state
+   *       'negative_amount' | // the update's value is negative
+   *       'incorrect_sender' | // the sender doesn't match the channel's sender
+   *       'amount_exceeds_channel_value' | // The update's amount exceeds the channel's value
    *   }
    */
   insertStateUpdate(stateUpdate) {

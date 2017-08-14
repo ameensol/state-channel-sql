@@ -68,6 +68,7 @@ describe('PGMachinomy', () => {
 
     amount: '123',
     signature: mksig(),
+    sender: 'sender-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx',
   }, x || {});
 
   let expectedDbState = update(testChannel, {
@@ -85,6 +86,8 @@ describe('PGMachinomy', () => {
   });
 
   describe('Inserting state updates', async () => {
+    beforeEach(() => pgm.insertChannelEvent(didCreateChannelEvent));
+
     it('Valid', async () => {
       let res = await pgm.insertStateUpdate(testStateUpdate());
 
@@ -99,7 +102,7 @@ describe('PGMachinomy', () => {
         'latest_state': expectedDbState,
         'added_amount': '123',
         'channel_payment': '123',
-        'channel_remaining_balance': null,
+        'channel_remaining_balance': '877',
       });
     });
 
@@ -147,6 +150,7 @@ describe('PGMachinomy', () => {
   });
 
   it('Get latest state', async () => {
+    await pgm.insertChannelEvent(didCreateChannelEvent);
     await pgm.insertStateUpdate(testStateUpdate());
 
     assert.containSubset(await pgm.getLatestState(testChannel), expectedDbState);
@@ -179,7 +183,7 @@ describe('PGMachinomy', () => {
     sender: 'sender-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx',
     receiver: 'receiver-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx',
     settlement_period: 17,
-    value: '0',
+    value: '1000',
     until: 7890,
   });
 
@@ -217,7 +221,7 @@ describe('PGMachinomy', () => {
     assert.containSubset(res, {
       channel: {
         state: 'CS_OPEN',
-        value: '500',
+        value: '1500',
       },
 
       latest_chain_event: {
@@ -238,14 +242,14 @@ describe('PGMachinomy', () => {
       is_invalid_reason: null,
 
       current_payment: '150',
-      current_remaining_balance: '350',
+      current_remaining_balance: '1350',
     });
 
     res = await pgm.insertStateUpdate(testStateUpdate({ amount: '300' }));
     assert.containSubset(res, {
       'added_amount': '150',
       'channel_payment': '300',
-      'channel_remaining_balance': '200',
+      'channel_remaining_balance': '1200',
     });
 
     await pgm.insertChannelIntent(update(didStartSettleEvent));
@@ -254,7 +258,7 @@ describe('PGMachinomy', () => {
     assert.containSubset(res, {
       channel: {
         state: 'CS_SETTLING',
-        value: '500',
+        value: '1500',
       },
 
       latest_chain_event: {
@@ -277,7 +281,7 @@ describe('PGMachinomy', () => {
       is_invalid_reason: null,
 
       current_payment: '300',
-      current_remaining_balance: '200',
+      current_remaining_balance: '1200',
     });
 
   });
@@ -341,13 +345,13 @@ describe('PGMachinomy', () => {
     await insertEvent(didDepositChannelEvent, 3, 'c', { value: '200' });
 
     res = await pgm.getChannelStatus(testChannel);
-    assert.containSubset(res, { channel: { value: '300' }});
+    assert.containSubset(res, { channel: { value: '1300' }});
 
     res = await pgm.setRecentBlocks(testChannel.chain_id, 1, ['a', 'b'].map(mkhash));
     assert.containSubset(res, {
       'updated_event_count': 1,
       'updated_channels': [
-        { channel: { value: '100' }},
+        { channel: { value: '1100' }},
       ],
     });
 
@@ -355,7 +359,7 @@ describe('PGMachinomy', () => {
     assert.containSubset(res, {
       'updated_event_count': 2,
       'updated_channels': [
-        { channel: { value: '200' }},
+        { channel: { value: '1200' }},
       ],
     });
 
